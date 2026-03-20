@@ -1,4 +1,8 @@
-#include "im2d_canvas.h"
+#include "im2d_canvas_widget.h"
+
+#include "im2d_canvas_document.h"
+#include "im2d_canvas_snap.h"
+#include "im2d_canvas_units.h"
 
 #include <algorithm>
 #include <array>
@@ -11,12 +15,27 @@ namespace im2d {
 
 namespace {
 
+enum class WorkingAreaHitZone {
+  None,
+  Body,
+  ResizeHandle,
+};
+
+struct WorkingAreaHit {
+  int id = 0;
+  WorkingAreaHitZone zone = WorkingAreaHitZone::None;
+};
+
 struct TransientCanvasState {
   bool creating_guide = false;
   GuideOrientation pending_orientation = GuideOrientation::Vertical;
   float pending_position = 0.0f;
   int dragging_guide_id = 0;
   int context_guide_id = 0;
+  int selected_working_area_id = 0;
+  int dragging_working_area_id = 0;
+  int resizing_working_area_id = 0;
+  ImVec2 working_area_drag_offset = ImVec2(0.0f, 0.0f);
 };
 
 TransientCanvasState &GetTransientCanvasState() {
@@ -38,10 +57,19 @@ ImVec2 ScreenToWorld(const CanvasState &state, const ImVec2 &canvas_min,
                 (point.y - canvas_min.y - state.view.pan.y) / state.view.zoom);
 }
 
+ImRect WorkingAreaScreenRect(const CanvasState &state, const ImVec2 &canvas_min,
+                             const WorkingArea &area) {
+  return ImRect(WorldToScreen(state, canvas_min, area.origin),
+                WorldToScreen(state, canvas_min,
+                              ImVec2(area.origin.x + area.size.x,
+                                     area.origin.y + area.size.y)));
+}
+
 float NiceStep(float raw_value) {
   if (raw_value <= 0.0f) {
     return 1.0f;
   }
+
   const float exponent = std::floor(std::log10(raw_value));
   const float base = std::pow(10.0f, exponent);
   const float fraction = raw_value / base;
@@ -58,13 +86,6 @@ float NiceStep(float raw_value) {
   }
 
   return nice_fraction * base;
-}
-
-Guide *FindGuide(CanvasState &state, int guide_id) {
-  auto it = std::find_if(
-      state.guides.begin(), state.guides.end(),
-      [guide_id](const Guide &guide) { return guide.id == guide_id; });
-  return it == state.guides.end() ? nullptr : &(*it);
 }
 
 int FindHoveredGuide(const CanvasState &state, const ImVec2 &canvas_min,
@@ -98,10 +119,46 @@ int FindHoveredGuide(const CanvasState &state, const ImVec2 &canvas_min,
   return hovered_id;
 }
 
+WorkingAreaHit FindHoveredWorkingArea(const CanvasState &state,
+                                      const ImVec2 &canvas_min,
+                                      const ImRect &canvas_rect,
+                                      const ImVec2 &mouse_pos,
+                                      float resize_handle_size) {
+  if (!canvas_rect.Contains(mouse_pos)) {
+    return {};
+  }
+
+  for (auto it = state.working_areas.rbegin(); it != state.working_areas.rend();
+       ++it) {
+    const WorkingArea &area = *it;
+    if (!area.visible) {
+      continue;
+    }
+
+    const ImRect screen_rect = WorkingAreaScreenRect(state, canvas_min, area);
+    if (!screen_rect.Contains(mouse_pos)) {
+      continue;
+    }
+
+    if (HasWorkingAreaFlag(area.flags, WorkingAreaFlagResizable)) {
+      const ImRect handle_rect(
+          ImVec2(screen_rect.Max.x - resize_handle_size,
+                 screen_rect.Max.y - resize_handle_size),
+          screen_rect.Max);
+      if (handle_rect.Contains(mouse_pos)) {
+        return {area.id, WorkingAreaHitZone::ResizeHandle};
+      }
+    }
+
+    return {area.id, WorkingAreaHitZone::Body};
+  }
+
+  return {};
+}
+
 void RemoveGuide(CanvasState &state, int guide_id) {
-  std::erase_if(state.guides, [guide_id](const Guide &guide) {
-    return guide.id == guide_id;
-  });
+  std::erase_if(state.guides,
+                [guide_id](const Guide &guide) { return guide.id == guide_id; });
 }
 
 void DrawGrid(ImDrawList *draw_list, const CanvasState &state,
@@ -112,7 +169,7 @@ void DrawGrid(ImDrawList *draw_list, const CanvasState &state,
   }
 
   const float major_spacing_world =
-      UnitsToPixels(state.grid.spacing, state.grid.unit, state.pixels_per_mm);
+      UnitsToPixels(state.grid.spacing, state.grid.unit, state.calibration);
   if (major_spacing_world <= 0.0f) {
     return;
   }
@@ -189,13 +246,16 @@ void DrawGrid(ImDrawList *draw_list, const CanvasState &state,
 }
 
 void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
-                      const ImRect &canvas_rect) {
+                      const ImRect &canvas_rect, int selected_working_area_id,
+                      const CanvasWidgetOptions &options) {
   draw_list->PushClipRect(canvas_rect.Min, canvas_rect.Max, true);
 
   const ImU32 fill_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_fill);
   const ImU32 border_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_border);
+  const ImU32 selected_color =
+      ImGui::ColorConvertFloat4ToU32(state.theme.working_area_selected);
   const ImU32 export_outline =
       ImGui::ColorConvertFloat4ToU32(state.theme.export_area_outline);
 
@@ -204,25 +264,39 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
       continue;
     }
 
-    const ImVec2 min = WorldToScreen(state, canvas_rect.Min, area.origin);
-    const ImVec2 max = WorldToScreen(
-        state, canvas_rect.Min,
-        ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y));
-    draw_list->AddRectFilled(min, max, fill_color, 4.0f);
-    draw_list->AddRect(min, max, border_color, 4.0f, 0, 2.0f);
-    draw_list->AddText(ImVec2(min.x + 8.0f, min.y + 8.0f), border_color,
-                       area.name.c_str());
+    const ImRect screen_rect = WorkingAreaScreenRect(state, canvas_rect.Min, area);
+    const bool selected = area.id == selected_working_area_id;
+    const ImU32 active_border = selected ? selected_color : border_color;
+    const float thickness = selected ? 3.0f : 2.0f;
+
+    draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max, fill_color, 4.0f);
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max, active_border, 4.0f, 0,
+                       thickness);
+    draw_list->AddText(ImVec2(screen_rect.Min.x + 8.0f, screen_rect.Min.y + 8.0f),
+                       active_border, area.name.c_str());
+
+    if (selected && HasWorkingAreaFlag(area.flags, WorkingAreaFlagResizable)) {
+      const ImRect handle_rect(
+          ImVec2(screen_rect.Max.x - options.resize_handle_size,
+                 screen_rect.Max.y - options.resize_handle_size),
+          screen_rect.Max);
+      draw_list->AddRectFilled(handle_rect.Min, handle_rect.Max, active_border,
+                               2.0f);
+    }
   }
 
   for (const ExportArea &area : state.export_areas) {
     if (!area.visible) {
       continue;
     }
-    const ImVec2 min = WorldToScreen(state, canvas_rect.Min, area.origin);
-    const ImVec2 max = WorldToScreen(
-        state, canvas_rect.Min,
-        ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y));
-    draw_list->AddRect(min, max, export_outline, 0.0f, 0, 1.0f);
+
+    const ImRect screen_rect(
+        WorldToScreen(state, canvas_rect.Min, area.origin),
+        WorldToScreen(state, canvas_rect.Min,
+                      ImVec2(area.origin.x + area.size.x,
+                             area.origin.y + area.size.y)));
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max, export_outline, 0.0f,
+                       0, 1.0f);
   }
 
   draw_list->PopClipRect();
@@ -290,8 +364,7 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
   draw_list->AddRectFilled(rect.Min, rect.Max, background);
 
   const float pixels_per_unit =
-      UnitsToPixels(1.0f, state.ruler_unit, state.pixels_per_mm) *
-      state.view.zoom;
+      UnitsToPixels(1.0f, state.ruler_unit, state.calibration) * state.view.zoom;
   if (pixels_per_unit <= 0.0f) {
     return;
   }
@@ -299,9 +372,9 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
   const float major_step_units = NiceStep(80.0f / pixels_per_unit);
   const float minor_step_units = major_step_units / 5.0f;
   const float major_step_world =
-      UnitsToPixels(major_step_units, state.ruler_unit, state.pixels_per_mm);
+      UnitsToPixels(major_step_units, state.ruler_unit, state.calibration);
   const float minor_step_world =
-      UnitsToPixels(minor_step_units, state.ruler_unit, state.pixels_per_mm);
+      UnitsToPixels(minor_step_units, state.ruler_unit, state.calibration);
 
   if (minor_step_world <= 0.0f || major_step_world <= 0.0f) {
     return;
@@ -323,9 +396,9 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
                        .y;
 
   const float min_units =
-      PixelsToUnits(visible_min_world, state.ruler_unit, state.pixels_per_mm);
+      PixelsToUnits(visible_min_world, state.ruler_unit, state.calibration);
   const float max_units =
-      PixelsToUnits(visible_max_world, state.ruler_unit, state.pixels_per_mm);
+      PixelsToUnits(visible_max_world, state.ruler_unit, state.calibration);
   const float start_units =
       std::floor(std::min(min_units, max_units) / minor_step_units) *
       minor_step_units;
@@ -336,12 +409,10 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
   for (float tick_units = start_units; tick_units <= end_units;
        tick_units += minor_step_units) {
     const float tick_world =
-        UnitsToPixels(tick_units, state.ruler_unit, state.pixels_per_mm);
-    const bool major =
-        std::fabs(std::fmod(std::fabs(tick_units), major_step_units)) <
-            0.0001f ||
-        std::fabs(std::fmod(std::fabs(tick_units), major_step_units) -
-                  major_step_units) < 0.0001f;
+        UnitsToPixels(tick_units, state.ruler_unit, state.calibration);
+    const float remainder = std::fmod(std::fabs(tick_units), major_step_units);
+    const bool major = remainder < 0.0001f ||
+                       std::fabs(remainder - major_step_units) < 0.0001f;
     const float tick_length =
         major
             ? (horizontal ? rect.GetHeight() - 4.0f : rect.GetWidth() - 4.0f)
@@ -376,76 +447,6 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
 }
 
 } // namespace
-
-const char *MeasurementUnitLabel(MeasurementUnit unit) {
-  switch (unit) {
-  case MeasurementUnit::Pixels:
-    return "px";
-  case MeasurementUnit::Millimeters:
-    return "mm";
-  case MeasurementUnit::Inches:
-    return "in";
-  }
-  return "?";
-}
-
-float UnitsToPixels(float value, MeasurementUnit unit, float pixels_per_mm) {
-  switch (unit) {
-  case MeasurementUnit::Pixels:
-    return value;
-  case MeasurementUnit::Millimeters:
-    return value * pixels_per_mm;
-  case MeasurementUnit::Inches:
-    return value * pixels_per_mm * 25.4f;
-  }
-  return value;
-}
-
-float PixelsToUnits(float value, MeasurementUnit unit, float pixels_per_mm) {
-  switch (unit) {
-  case MeasurementUnit::Pixels:
-    return value;
-  case MeasurementUnit::Millimeters:
-    return value / pixels_per_mm;
-  case MeasurementUnit::Inches:
-    return value / (pixels_per_mm * 25.4f);
-  }
-  return value;
-}
-
-int AddWorkingArea(CanvasState &state, const std::string &name,
-                   ImVec2 size_pixels) {
-  WorkingArea area;
-  area.id = state.next_working_area_id++;
-  area.name = name;
-  area.size =
-      ImVec2(std::max(size_pixels.x, 1.0f), std::max(size_pixels.y, 1.0f));
-  const float stagger = 32.0f * static_cast<float>(state.working_areas.size());
-  area.origin = ImVec2(stagger, stagger);
-  state.working_areas.push_back(area);
-
-  ExportArea export_area;
-  export_area.id = state.next_export_area_id++;
-  export_area.source_working_area_id = area.id;
-  export_area.origin = area.origin;
-  export_area.size = area.size;
-  state.export_areas.push_back(export_area);
-  return area.id;
-}
-
-void InitializeDefaultDocument(CanvasState &state) {
-  if (state.layers.empty()) {
-    state.layers.push_back(Layer{state.next_layer_id++, "Root", true, false});
-  }
-
-  if (state.working_areas.empty()) {
-    AddWorkingArea(state, "Working Area 1",
-                   ImVec2(UnitsToPixels(210.0f, MeasurementUnit::Millimeters,
-                                        state.pixels_per_mm),
-                          UnitsToPixels(297.0f, MeasurementUnit::Millimeters,
-                                        state.pixels_per_mm)));
-  }
-}
 
 bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   InitializeDefaultDocument(state);
@@ -488,12 +489,12 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       corner_rect.Min, corner_rect.Max,
       ImGui::ColorConvertFloat4ToU32(state.theme.ruler_background));
 
-  DrawWorkingAreas(draw_list, state, canvas_rect);
-  DrawGrid(draw_list, state, canvas_rect);
-
   const bool canvas_hovered = canvas_rect.Contains(io.MousePos);
   const bool top_ruler_hovered = top_ruler_rect.Contains(io.MousePos);
   const bool left_ruler_hovered = left_ruler_rect.Contains(io.MousePos);
+  const WorkingAreaHit area_hit =
+      FindHoveredWorkingArea(state, canvas_rect.Min, canvas_rect, io.MousePos,
+                             options.resize_handle_size);
 
   int hovered_guide_id = 0;
   if (canvas_hovered && !transient_state.creating_guide) {
@@ -502,10 +503,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   }
 
   if (canvas_hovered && io.MouseWheel != 0.0f) {
-    const ImVec2 focus_world =
-        ScreenToWorld(state, canvas_rect.Min, io.MousePos);
-    state.view.zoom =
-        ClampZoom(state.view.zoom * std::pow(1.15f, io.MouseWheel));
+    const ImVec2 focus_world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+    state.view.zoom = ClampZoom(state.view.zoom * std::pow(1.15f, io.MouseWheel));
     state.view.pan = ImVec2(
         io.MousePos.x - canvas_rect.Min.x - focus_world.x * state.view.zoom,
         io.MousePos.y - canvas_rect.Min.y - focus_world.y * state.view.zoom);
@@ -527,27 +526,45 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
 
   if (transient_state.creating_guide) {
     const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+    const float raw_position =
+        transient_state.pending_orientation == GuideOrientation::Vertical ? world.x
+                                                                         : world.y;
     transient_state.pending_position =
-        transient_state.pending_orientation == GuideOrientation::Vertical
-            ? world.x
-            : world.y;
+        SnapAxisCoordinate(state, transient_state.pending_orientation,
+                           raw_position)
+            .value;
 
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-      state.guides.push_back(Guide{
-          state.next_guide_id++,
-          transient_state.pending_orientation,
-          transient_state.pending_position,
-          false,
-      });
+      state.guides.push_back(Guide{state.next_guide_id++,
+                                   transient_state.pending_orientation,
+                                   transient_state.pending_position, false});
       transient_state.creating_guide = false;
     }
   }
 
   if (!transient_state.creating_guide && canvas_hovered &&
-      hovered_guide_id != 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-    if (Guide *guide = FindGuide(state, hovered_guide_id);
-        guide != nullptr && !guide->locked) {
-      transient_state.dragging_guide_id = hovered_guide_id;
+      ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (hovered_guide_id != 0) {
+      if (Guide *guide = FindGuide(state, hovered_guide_id);
+          guide != nullptr && !guide->locked) {
+        transient_state.dragging_guide_id = hovered_guide_id;
+      }
+    } else if (area_hit.id != 0) {
+      transient_state.selected_working_area_id = area_hit.id;
+      if (WorkingArea *area = FindWorkingArea(state, area_hit.id); area != nullptr) {
+        const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+        if (area_hit.zone == WorkingAreaHitZone::ResizeHandle &&
+            HasWorkingAreaFlag(area->flags, WorkingAreaFlagResizable)) {
+          transient_state.resizing_working_area_id = area_hit.id;
+        } else if (area_hit.zone == WorkingAreaHitZone::Body &&
+                   HasWorkingAreaFlag(area->flags, WorkingAreaFlagMovable)) {
+          transient_state.dragging_working_area_id = area_hit.id;
+          transient_state.working_area_drag_offset =
+              ImVec2(world.x - area->origin.x, world.y - area->origin.y);
+        }
+      }
+    } else {
+      transient_state.selected_working_area_id = 0;
     }
   }
 
@@ -556,12 +573,51 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       if (Guide *guide = FindGuide(state, transient_state.dragging_guide_id);
           guide != nullptr) {
         const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
-        guide->position = guide->orientation == GuideOrientation::Vertical
-                              ? world.x
-                              : world.y;
+        const float raw_position =
+            guide->orientation == GuideOrientation::Vertical ? world.x : world.y;
+        guide->position = SnapAxisCoordinate(state, guide->orientation,
+                                             raw_position, guide->id)
+                              .value;
       }
     } else {
       transient_state.dragging_guide_id = 0;
+    }
+  }
+
+  if (transient_state.dragging_working_area_id != 0) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      if (WorkingArea *area =
+              FindWorkingArea(state, transient_state.dragging_working_area_id);
+          area != nullptr) {
+        const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+        ImVec2 new_origin(world.x - transient_state.working_area_drag_offset.x,
+                          world.y - transient_state.working_area_drag_offset.y);
+        new_origin = SnapPoint(state, new_origin);
+        area->origin = new_origin;
+        SyncExportAreaFromWorkingArea(state, area->id);
+      }
+    } else {
+      transient_state.dragging_working_area_id = 0;
+    }
+  }
+
+  if (transient_state.resizing_working_area_id != 0) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      if (WorkingArea *area =
+              FindWorkingArea(state, transient_state.resizing_working_area_id);
+          area != nullptr) {
+        ImVec2 bottom_right =
+            SnapPoint(state, ScreenToWorld(state, canvas_rect.Min, io.MousePos));
+        bottom_right.x = std::max(bottom_right.x,
+                                  area->origin.x + options.min_working_area_size);
+        bottom_right.y = std::max(bottom_right.y,
+                                  area->origin.y + options.min_working_area_size);
+        area->size = ImVec2(bottom_right.x - area->origin.x,
+                            bottom_right.y - area->origin.y);
+        SyncExportAreaFromWorkingArea(state, area->id);
+      }
+    } else {
+      transient_state.resizing_working_area_id = 0;
     }
   }
 
@@ -575,6 +631,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     ImGui::OpenPopup("canvas_context_menu");
   }
 
+  DrawWorkingAreas(draw_list, state, canvas_rect,
+                   transient_state.selected_working_area_id, options);
+  DrawGrid(draw_list, state, canvas_rect);
   DrawGuides(draw_list, state, canvas_rect, hovered_guide_id, transient_state);
   DrawRulerAxis(draw_list, state, top_ruler_rect, true);
   DrawRulerAxis(draw_list, state, left_ruler_rect, false);
@@ -584,7 +643,6 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   draw_list->AddLine(ImVec2(total_rect.Min.x, canvas_rect.Min.y),
                      ImVec2(total_rect.Max.x, canvas_rect.Min.y),
                      ImGui::ColorConvertFloat4ToU32(state.theme.ruler_ticks));
-
   draw_list->AddText(ImVec2(corner_rect.Min.x + 6.0f, corner_rect.Min.y + 7.0f),
                      ImGui::ColorConvertFloat4ToU32(state.theme.ruler_text),
                      MeasurementUnitLabel(state.ruler_unit));
@@ -592,9 +650,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   if (ImGui::BeginPopup("ruler_context_menu")) {
     ImGui::TextUnformatted("Ruler Units");
     ImGui::Separator();
-    for (MeasurementUnit unit :
-         {MeasurementUnit::Millimeters, MeasurementUnit::Inches,
-          MeasurementUnit::Pixels}) {
+    for (MeasurementUnit unit : {MeasurementUnit::Millimeters,
+                                 MeasurementUnit::Inches,
+                                 MeasurementUnit::Pixels}) {
       const bool selected = state.ruler_unit == unit;
       if (ImGui::MenuItem(MeasurementUnitLabel(unit), nullptr, selected)) {
         state.ruler_unit = unit;

@@ -6,6 +6,7 @@
 #include <glad/glad.h>
 #include <imgui.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -37,6 +38,8 @@ void DrawInspector(CanvasState &state) {
   static float width_value = 210.0f;
   static float height_value = 297.0f;
   static MeasurementUnit area_unit = MeasurementUnit::Millimeters;
+  static bool area_movable = true;
+  static bool area_resizable = true;
 
   ImGui::TextUnformatted("Working Areas");
   ImGui::InputText("Name", name_buffer.data(), name_buffer.size());
@@ -58,15 +61,33 @@ void DrawInspector(CanvasState &state) {
     ImGui::EndCombo();
   }
 
+  ImGui::Checkbox("New Areas Movable", &area_movable);
+  ImGui::Checkbox("New Areas Resizable", &area_resizable);
+
   if (ImGui::Button("Add Working Area")) {
-    const ImVec2 size_pixels(
-        im2d::UnitsToPixels(width_value, area_unit, state.pixels_per_mm),
-        im2d::UnitsToPixels(height_value, area_unit, state.pixels_per_mm));
-    const std::string name =
+    uint32_t flags = im2d::WorkingAreaFlagNone;
+    if (area_movable) {
+      flags |= im2d::WorkingAreaFlagMovable;
+    }
+    if (area_resizable) {
+      flags |= im2d::WorkingAreaFlagResizable;
+    }
+
+    im2d::WorkingAreaCreateInfo create_info;
+    create_info.name =
         name_buffer[0] == '\0'
             ? "Working Area " + std::to_string(state.next_working_area_id)
             : std::string(name_buffer.data());
-    im2d::AddWorkingArea(state, name, size_pixels);
+    create_info.size_pixels =
+        ImVec2(im2d::UnitsToPixels(width_value, area_unit, state.calibration),
+               im2d::UnitsToPixels(height_value, area_unit, state.calibration));
+    create_info.flags = flags;
+    const std::string name =
+        create_info.name.empty()
+            ? "Working Area " + std::to_string(state.next_working_area_id)
+            : create_info.name;
+    create_info.name = name;
+    im2d::AddWorkingArea(state, create_info);
   }
 
   ImGui::Separator();
@@ -97,6 +118,50 @@ void DrawInspector(CanvasState &state) {
   }
 
   ImGui::Separator();
+  ImGui::TextUnformatted("Physical Calibration");
+  ImGui::Checkbox("Use Calibrated Physical Units", &state.calibration.enabled);
+  ImGui::InputFloat("Reference Pixels", &state.calibration.reference_pixels,
+                    1.0f, 10.0f, "%.2f");
+  ImGui::InputFloat("Measured Length", &state.calibration.measured_length, 1.0f,
+                    10.0f, "%.2f");
+  if (ImGui::BeginCombo(
+          "Measured Unit",
+          im2d::MeasurementUnitLabel(state.calibration.measured_unit))) {
+    for (MeasurementUnit unit :
+         {MeasurementUnit::Millimeters, MeasurementUnit::Inches}) {
+      const bool selected = state.calibration.measured_unit == unit;
+      if (ImGui::Selectable(im2d::MeasurementUnitLabel(unit), selected)) {
+        state.calibration.measured_unit = unit;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+  if (ImGui::Button("Apply Calibration")) {
+    im2d::ApplyCalibration(state.calibration);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Reset Calibration")) {
+    state.calibration.enabled = false;
+    state.calibration.calibrated_pixels_per_mm =
+        state.calibration.default_pixels_per_mm;
+  }
+  ImGui::Text("Pixels/mm: %.4f",
+              im2d::GetPixelsPerMillimeter(state.calibration));
+  ImGui::Text("Pixels/in: %.2f",
+              im2d::GetPixelsPerMillimeter(state.calibration) * 25.4f);
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Snapping");
+  ImGui::Checkbox("Snap to Guides", &state.snapping.to_guides);
+  ImGui::Checkbox("Snap to Main Grid", &state.snapping.to_grid_major);
+  ImGui::Checkbox("Snap to Subgrid", &state.snapping.to_grid_minor);
+  ImGui::SliderFloat("Snap Threshold", &state.snapping.screen_threshold, 2.0f,
+                     20.0f, "%.1f px");
+
+  ImGui::Separator();
   ImGui::TextUnformatted("Theme");
   ImGui::ColorEdit4("Canvas Background", &state.theme.canvas_background.x);
   ImGui::ColorEdit4("Ruler Background", &state.theme.ruler_background.x);
@@ -109,6 +174,8 @@ void DrawInspector(CanvasState &state) {
   ImGui::ColorEdit4("Guide Locked", &state.theme.guide_locked.x);
   ImGui::ColorEdit4("Working Area Fill", &state.theme.working_area_fill.x);
   ImGui::ColorEdit4("Working Area Border", &state.theme.working_area_border.x);
+  ImGui::ColorEdit4("Working Area Selected",
+                    &state.theme.working_area_selected.x);
   ImGui::ColorEdit4("Export Area Outline", &state.theme.export_area_outline.x);
 
   ImGui::Separator();
@@ -117,6 +184,8 @@ void DrawInspector(CanvasState &state) {
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Left drag from rulers: create guides");
   ImGui::BulletText("Left drag guide: move guide");
+  ImGui::BulletText("Left drag work area: move when movable");
+  ImGui::BulletText("Bottom-right handle: resize when resizable");
   ImGui::BulletText("Right click guide: lock or delete");
   ImGui::BulletText("Right click ruler: change units");
 
