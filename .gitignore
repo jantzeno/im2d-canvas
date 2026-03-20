@@ -1,0 +1,27 @@
+# Xmake cache
+.xmake/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.kate-swp
+*.kwrite-swp
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+plans/
+
+# IMGUI
+imgui.ini
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
