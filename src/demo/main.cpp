@@ -1,4 +1,4 @@
-#include "im2d_canvas.h"
+#include "../canvas/im2d_canvas.h"
 
 #include <SDL3/SDL.h>
 #include <backends/imgui_impl_opengl3.h>
