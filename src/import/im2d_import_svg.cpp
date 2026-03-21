@@ -72,6 +72,15 @@ bool IsFilledTextShape(const NSVGshape &shape,
          MatchesRgbColor(shape.fill.color, options.text_filled_glyph_color);
 }
 
+bool IsHoleTextShape(const NSVGshape &shape, const ImportSvgOptions &options) {
+  if (!options.mark_text_placeholders || options.text_hole_glyph_color == 0) {
+    return false;
+  }
+
+  return shape.fill.type == NSVG_PAINT_COLOR &&
+         MatchesRgbColor(shape.fill.color, options.text_hole_glyph_color);
+}
+
 ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
                                     const std::string &source_path,
                                     const lunasvg::Document &document,
@@ -108,6 +117,10 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
       continue;
     }
 
+    const bool is_text_placeholder = IsTextPlaceholderShape(*shape, options);
+    const bool is_filled_text = IsFilledTextShape(*shape, options);
+    const bool is_hole_text = IsHoleTextShape(*shape, options);
+
     for (const NSVGpath *path = shape->paths; path != nullptr;
          path = path->next) {
       if (path->npts < 4) {
@@ -116,8 +129,6 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
       }
 
       ImportedPath imported_path;
-      const bool is_text_placeholder = IsTextPlaceholderShape(*shape, options);
-      const bool is_filled_text = IsFilledTextShape(*shape, options);
       imported_path.stroke_color = ResolveStrokeColor(*shape);
       imported_path.stroke_width =
           shape->strokeWidth > 0.0f ? shape->strokeWidth : 1.0f;
@@ -127,6 +138,9 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
       }
       if (is_filled_text) {
         imported_path.flags |= ImportedPathFlagFilledText;
+      }
+      if (is_hole_text) {
+        imported_path.flags |= ImportedPathFlagHoleContour;
       }
 
       for (int point_index = 0; point_index + 3 < path->npts;

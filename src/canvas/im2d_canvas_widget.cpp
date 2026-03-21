@@ -379,6 +379,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
       const bool is_dxf_artwork = artwork.source_format == "DXF";
       const bool is_filled_text =
           HasImportedPathFlag(path.flags, ImportedPathFlagFilledText);
+      const bool is_hole_contour =
+          HasImportedPathFlag(path.flags, ImportedPathFlagHoleContour);
       const float average_scale = (artwork.scale.x + artwork.scale.y) * 0.5f;
       const float thickness =
           is_dxf_artwork ? std::max(1.0f, path.stroke_width)
@@ -387,11 +389,17 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
                                               state.view.zoom);
       const ImU32 packed_color =
           ImGui::ColorConvertFloat4ToU32(path.stroke_color);
+      const ImU32 background_color =
+          ImGui::ColorConvertFloat4ToU32(state.theme.canvas_background);
 
       append_path();
-      if (is_filled_text && path.closed) {
+      if (is_filled_text && path.closed && !is_hole_contour) {
         draw_list->PathFillConcave(packed_color);
         append_path();
+      }
+      if (is_hole_contour && path.closed) {
+        draw_list->PathFillConcave(background_color);
+        continue;
       }
       draw_list->PathStroke(packed_color, path.closed,
                             is_filled_text ? std::max(1.0f, thickness * 0.35f)

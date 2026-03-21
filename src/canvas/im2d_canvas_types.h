@@ -148,6 +148,7 @@ enum ImportedPathFlags : uint32_t {
   ImportedPathFlagNone = 0,
   ImportedPathFlagTextPlaceholder = 1u << 0,
   ImportedPathFlagFilledText = 1u << 1,
+  ImportedPathFlagHoleContour = 1u << 2,
 };
 
 constexpr bool HasImportedPathFlag(uint32_t flags, ImportedPathFlags flag) {
