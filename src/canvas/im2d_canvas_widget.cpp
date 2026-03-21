@@ -349,39 +349,53 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
         continue;
       }
 
-      draw_list->PathClear();
-      const ImVec2 first_world =
-          ImportedArtworkPointToWorld(artwork, path.segments.front().start);
-      draw_list->PathLineTo(WorldToScreen(state, canvas_rect.Min, first_world));
+      const auto append_path = [&]() {
+        draw_list->PathClear();
+        const ImVec2 first_world =
+            ImportedArtworkPointToWorld(artwork, path.segments.front().start);
+        draw_list->PathLineTo(
+            WorldToScreen(state, canvas_rect.Min, first_world));
 
-      for (const ImportedPathSegment &segment : path.segments) {
-        const ImVec2 end_world =
-            ImportedArtworkPointToWorld(artwork, segment.end);
-        if (segment.kind == ImportedPathSegmentKind::Line) {
-          draw_list->PathLineTo(
+        for (const ImportedPathSegment &segment : path.segments) {
+          const ImVec2 end_world =
+              ImportedArtworkPointToWorld(artwork, segment.end);
+          if (segment.kind == ImportedPathSegmentKind::Line) {
+            draw_list->PathLineTo(
+                WorldToScreen(state, canvas_rect.Min, end_world));
+            continue;
+          }
+
+          const ImVec2 control1_world =
+              ImportedArtworkPointToWorld(artwork, segment.control1);
+          const ImVec2 control2_world =
+              ImportedArtworkPointToWorld(artwork, segment.control2);
+          draw_list->PathBezierCubicCurveTo(
+              WorldToScreen(state, canvas_rect.Min, control1_world),
+              WorldToScreen(state, canvas_rect.Min, control2_world),
               WorldToScreen(state, canvas_rect.Min, end_world));
-          continue;
         }
-
-        const ImVec2 control1_world =
-            ImportedArtworkPointToWorld(artwork, segment.control1);
-        const ImVec2 control2_world =
-            ImportedArtworkPointToWorld(artwork, segment.control2);
-        draw_list->PathBezierCubicCurveTo(
-            WorldToScreen(state, canvas_rect.Min, control1_world),
-            WorldToScreen(state, canvas_rect.Min, control2_world),
-            WorldToScreen(state, canvas_rect.Min, end_world));
-      }
+      };
 
       const bool is_dxf_artwork = artwork.source_format == "DXF";
+      const bool is_filled_text =
+          HasImportedPathFlag(path.flags, ImportedPathFlagFilledText);
       const float average_scale = (artwork.scale.x + artwork.scale.y) * 0.5f;
       const float thickness =
           is_dxf_artwork ? std::max(1.0f, path.stroke_width)
                          : std::max(1.0f, path.stroke_width *
                                               std::max(average_scale, 0.1f) *
                                               state.view.zoom);
-      draw_list->PathStroke(ImGui::ColorConvertFloat4ToU32(path.stroke_color),
-                            path.closed, thickness);
+      const ImU32 packed_color =
+          ImGui::ColorConvertFloat4ToU32(path.stroke_color);
+
+      append_path();
+      if (is_filled_text && path.closed) {
+        draw_list->PathFillConcave(packed_color);
+        append_path();
+      }
+      draw_list->PathStroke(packed_color, path.closed,
+                            is_filled_text ? std::max(1.0f, thickness * 0.35f)
+                                           : thickness);
     }
 
     if (artwork.id == selected_imported_artwork_id) {

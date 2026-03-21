@@ -12,6 +12,7 @@ namespace im2d::importer {
 struct ImportSvgOptions {
   bool mark_text_placeholders = false;
   unsigned int text_placeholder_color = 0;
+  unsigned int text_filled_glyph_color = 0;
   ImVec4 text_placeholder_display_color = ImVec4(0.92f, 0.94f, 0.97f, 1.0f);
 };
 

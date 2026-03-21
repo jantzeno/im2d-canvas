@@ -58,7 +58,18 @@ bool IsTextPlaceholderShape(const NSVGshape &shape,
           MatchesRgbColor(shape.stroke.color,
                           options.text_placeholder_color)) ||
          (shape.fill.type == NSVG_PAINT_COLOR &&
-          MatchesRgbColor(shape.fill.color, options.text_placeholder_color));
+          (MatchesRgbColor(shape.fill.color, options.text_placeholder_color) ||
+           MatchesRgbColor(shape.fill.color, options.text_filled_glyph_color)));
+}
+
+bool IsFilledTextShape(const NSVGshape &shape,
+                       const ImportSvgOptions &options) {
+  if (!options.mark_text_placeholders || options.text_filled_glyph_color == 0) {
+    return false;
+  }
+
+  return shape.fill.type == NSVG_PAINT_COLOR &&
+         MatchesRgbColor(shape.fill.color, options.text_filled_glyph_color);
 }
 
 ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
@@ -106,12 +117,16 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
 
       ImportedPath imported_path;
       const bool is_text_placeholder = IsTextPlaceholderShape(*shape, options);
+      const bool is_filled_text = IsFilledTextShape(*shape, options);
       imported_path.stroke_color = ResolveStrokeColor(*shape);
       imported_path.stroke_width =
           shape->strokeWidth > 0.0f ? shape->strokeWidth : 1.0f;
       imported_path.closed = path->closed != 0;
       if (is_text_placeholder) {
         imported_path.flags |= ImportedPathFlagTextPlaceholder;
+      }
+      if (is_filled_text) {
+        imported_path.flags |= ImportedPathFlagFilledText;
       }
 
       for (int point_index = 0; point_index + 3 < path->npts;

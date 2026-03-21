@@ -34,6 +34,7 @@ constexpr int kMaxImported3dFaces = 20000;
 constexpr int kPolylineFlagClosed = 0x01;
 constexpr int kPolylineFlagPolyfaceMesh = 0x40;
 constexpr unsigned int kDxfTextPlaceholderColor = 0x00ff01ffu;
+constexpr unsigned int kDxfFilledTextColor = 0x00ff02ffu;
 
 std::string FormatNumber(double value) {
   std::ostringstream stream;
@@ -1571,7 +1572,7 @@ private:
         text, data.basePoint.x, data.basePoint.y, std::max(data.height, 1.0),
         widthscale, data.angle, HorizontalAlignmentForText(data, multiline),
         VerticalAlignmentForText(data, multiline), line_spacing_factor,
-        stroke_color, kDxfTextPlaceholderColor, CurrentBody(),
+        stroke_color, kDxfFilledTextColor, CurrentBody(),
         [this](double x, double y) { UpdateBounds(x, y); });
     if (!emitted) {
       return false;
@@ -1769,6 +1770,7 @@ ImportResult ImportDxfFile(CanvasState &state,
   ImportSvgOptions svg_options;
   svg_options.mark_text_placeholders = true;
   svg_options.text_placeholder_color = kDxfTextPlaceholderColor;
+  svg_options.text_filled_glyph_color = kDxfFilledTextColor;
 
   ImportResult result =
       ImportSvgData(state, svg_data, file_path.filename().string(),
