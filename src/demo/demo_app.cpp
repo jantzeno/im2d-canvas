@@ -1,5 +1,7 @@
 #include "demo_app.h"
 
+#include "../common/im2d_log.h"
+
 #include <SDL3/SDL.h>
 #include <backends/imgui_impl_opengl3.h>
 #include <backends/imgui_impl_sdl3.h>
@@ -27,6 +29,7 @@ void Require(bool condition, const std::string &message) {
 } // namespace
 
 int RunDemoApp(const DemoConfig &config) {
+  im2d::log::InitializeLogger();
   setenv("SDL_VIDEODRIVER", "wayland", 1);
 
   Require(SDL_Init(SDL_INIT_VIDEO),
@@ -123,6 +126,7 @@ int RunDemoApp(const DemoConfig &config) {
   SDL_GL_DestroyContext(gl_context);
   SDL_DestroyWindow(window);
   SDL_Quit();
+  im2d::log::ShutdownLogger();
   return 0;
 }
 

@@ -21,9 +21,20 @@ enum class WorkingAreaHitZone {
   ResizeHandle,
 };
 
+enum class ImportedArtworkHitZone {
+  None,
+  Body,
+  ResizeHandle,
+};
+
 struct WorkingAreaHit {
   int id = 0;
   WorkingAreaHitZone zone = WorkingAreaHitZone::None;
+};
+
+struct ImportedArtworkHit {
+  int id = 0;
+  ImportedArtworkHitZone zone = ImportedArtworkHitZone::None;
 };
 
 struct TransientCanvasState {
@@ -32,9 +43,13 @@ struct TransientCanvasState {
   float pending_position = 0.0f;
   int dragging_guide_id = 0;
   int context_guide_id = 0;
+  int context_imported_artwork_id = 0;
+  int dragging_imported_artwork_id = 0;
+  int resizing_imported_artwork_id = 0;
   int selected_working_area_id = 0;
   int dragging_working_area_id = 0;
   int resizing_working_area_id = 0;
+  ImVec2 imported_artwork_drag_offset = ImVec2(0.0f, 0.0f);
   ImVec2 working_area_drag_offset = ImVec2(0.0f, 0.0f);
 };
 
@@ -63,6 +78,34 @@ ImRect WorkingAreaScreenRect(const CanvasState &state, const ImVec2 &canvas_min,
                 WorldToScreen(state, canvas_min,
                               ImVec2(area.origin.x + area.size.x,
                                      area.origin.y + area.size.y)));
+}
+
+ImVec2 ImportedArtworkLocalSize(const ImportedArtwork &artwork) {
+  return ImVec2(std::max(artwork.bounds_max.x - artwork.bounds_min.x, 1.0f),
+                std::max(artwork.bounds_max.y - artwork.bounds_min.y, 1.0f));
+}
+
+ImVec2 ImportedArtworkScaledSize(const ImportedArtwork &artwork) {
+  const ImVec2 local_size = ImportedArtworkLocalSize(artwork);
+  return ImVec2(std::max(local_size.x * artwork.scale.x, 1.0f),
+                std::max(local_size.y * artwork.scale.y, 1.0f));
+}
+
+ImVec2 ImportedArtworkPointToWorld(const ImportedArtwork &artwork,
+                                   const ImVec2 &point) {
+  return ImVec2(
+      artwork.origin.x + (point.x - artwork.bounds_min.x) * artwork.scale.x,
+      artwork.origin.y + (point.y - artwork.bounds_min.y) * artwork.scale.y);
+}
+
+ImRect ImportedArtworkScreenRect(const CanvasState &state,
+                                 const ImVec2 &canvas_min,
+                                 const ImportedArtwork &artwork) {
+  const ImVec2 size = ImportedArtworkScaledSize(artwork);
+  return ImRect(WorldToScreen(state, canvas_min, artwork.origin),
+                WorldToScreen(state, canvas_min,
+                              ImVec2(artwork.origin.x + size.x,
+                                     artwork.origin.y + size.y)));
 }
 
 float NiceStep(float raw_value) {
@@ -141,10 +184,9 @@ WorkingAreaHit FindHoveredWorkingArea(const CanvasState &state,
     }
 
     if (HasWorkingAreaFlag(area.flags, WorkingAreaFlagResizable)) {
-      const ImRect handle_rect(
-          ImVec2(screen_rect.Max.x - resize_handle_size,
-                 screen_rect.Max.y - resize_handle_size),
-          screen_rect.Max);
+      const ImRect handle_rect(ImVec2(screen_rect.Max.x - resize_handle_size,
+                                      screen_rect.Max.y - resize_handle_size),
+                               screen_rect.Max);
       if (handle_rect.Contains(mouse_pos)) {
         return {area.id, WorkingAreaHitZone::ResizeHandle};
       }
@@ -156,9 +198,47 @@ WorkingAreaHit FindHoveredWorkingArea(const CanvasState &state,
   return {};
 }
 
+ImportedArtworkHit FindHoveredImportedArtwork(const CanvasState &state,
+                                              const ImVec2 &canvas_min,
+                                              const ImRect &canvas_rect,
+                                              const ImVec2 &mouse_pos,
+                                              float resize_handle_size) {
+  if (!canvas_rect.Contains(mouse_pos)) {
+    return {};
+  }
+
+  for (auto it = state.imported_artwork.rbegin();
+       it != state.imported_artwork.rend(); ++it) {
+    const ImportedArtwork &artwork = *it;
+    if (!artwork.visible) {
+      continue;
+    }
+
+    const ImRect screen_rect =
+        ImportedArtworkScreenRect(state, canvas_min, artwork);
+    if (!screen_rect.Contains(mouse_pos)) {
+      continue;
+    }
+
+    if (HasImportedArtworkFlag(artwork.flags, ImportedArtworkFlagResizable)) {
+      const ImRect handle_rect(ImVec2(screen_rect.Max.x - resize_handle_size,
+                                      screen_rect.Max.y - resize_handle_size),
+                               screen_rect.Max);
+      if (handle_rect.Contains(mouse_pos)) {
+        return {artwork.id, ImportedArtworkHitZone::ResizeHandle};
+      }
+    }
+
+    return {artwork.id, ImportedArtworkHitZone::Body};
+  }
+
+  return {};
+}
+
 void RemoveGuide(CanvasState &state, int guide_id) {
-  std::erase_if(state.guides,
-                [guide_id](const Guide &guide) { return guide.id == guide_id; });
+  std::erase_if(state.guides, [guide_id](const Guide &guide) {
+    return guide.id == guide_id;
+  });
 }
 
 void DrawGrid(ImDrawList *draw_list, const CanvasState &state,
@@ -245,6 +325,84 @@ void DrawGrid(ImDrawList *draw_list, const CanvasState &state,
   draw_list->PopClipRect();
 }
 
+void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
+                         const ImRect &canvas_rect,
+                         int selected_imported_artwork_id,
+                         const CanvasWidgetOptions &options) {
+  draw_list->PushClipRect(canvas_rect.Min, canvas_rect.Max, true);
+
+  const ImU32 selected_color =
+      ImGui::ColorConvertFloat4ToU32(state.theme.working_area_selected);
+
+  for (const ImportedArtwork &artwork : state.imported_artwork) {
+    if (!artwork.visible) {
+      continue;
+    }
+
+    for (const ImportedPath &path : artwork.paths) {
+      if (path.segments.empty()) {
+        continue;
+      }
+
+      if (artwork.source_format == "DXF" && !state.show_imported_dxf_text &&
+          HasImportedPathFlag(path.flags, ImportedPathFlagTextPlaceholder)) {
+        continue;
+      }
+
+      draw_list->PathClear();
+      const ImVec2 first_world =
+          ImportedArtworkPointToWorld(artwork, path.segments.front().start);
+      draw_list->PathLineTo(WorldToScreen(state, canvas_rect.Min, first_world));
+
+      for (const ImportedPathSegment &segment : path.segments) {
+        const ImVec2 end_world =
+            ImportedArtworkPointToWorld(artwork, segment.end);
+        if (segment.kind == ImportedPathSegmentKind::Line) {
+          draw_list->PathLineTo(
+              WorldToScreen(state, canvas_rect.Min, end_world));
+          continue;
+        }
+
+        const ImVec2 control1_world =
+            ImportedArtworkPointToWorld(artwork, segment.control1);
+        const ImVec2 control2_world =
+            ImportedArtworkPointToWorld(artwork, segment.control2);
+        draw_list->PathBezierCubicCurveTo(
+            WorldToScreen(state, canvas_rect.Min, control1_world),
+            WorldToScreen(state, canvas_rect.Min, control2_world),
+            WorldToScreen(state, canvas_rect.Min, end_world));
+      }
+
+      const bool is_dxf_artwork = artwork.source_format == "DXF";
+      const float average_scale = (artwork.scale.x + artwork.scale.y) * 0.5f;
+      const float thickness =
+          is_dxf_artwork ? std::max(1.0f, path.stroke_width)
+                         : std::max(1.0f, path.stroke_width *
+                                              std::max(average_scale, 0.1f) *
+                                              state.view.zoom);
+      draw_list->PathStroke(ImGui::ColorConvertFloat4ToU32(path.stroke_color),
+                            path.closed, thickness);
+    }
+
+    if (artwork.id == selected_imported_artwork_id) {
+      const ImRect screen_rect =
+          ImportedArtworkScreenRect(state, canvas_rect.Min, artwork);
+      draw_list->AddRect(screen_rect.Min, screen_rect.Max, selected_color, 4.0f,
+                         0, 2.0f);
+      if (HasImportedArtworkFlag(artwork.flags, ImportedArtworkFlagResizable)) {
+        const ImRect handle_rect(
+            ImVec2(screen_rect.Max.x - options.resize_handle_size,
+                   screen_rect.Max.y - options.resize_handle_size),
+            screen_rect.Max);
+        draw_list->AddRectFilled(handle_rect.Min, handle_rect.Max,
+                                 selected_color, 2.0f);
+      }
+    }
+  }
+
+  draw_list->PopClipRect();
+}
+
 void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
                       const ImRect &canvas_rect, int selected_working_area_id,
                       const CanvasWidgetOptions &options) {
@@ -264,16 +422,19 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
       continue;
     }
 
-    const ImRect screen_rect = WorkingAreaScreenRect(state, canvas_rect.Min, area);
+    const ImRect screen_rect =
+        WorkingAreaScreenRect(state, canvas_rect.Min, area);
     const bool selected = area.id == selected_working_area_id;
     const ImU32 active_border = selected ? selected_color : border_color;
     const float thickness = selected ? 3.0f : 2.0f;
 
-    draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max, fill_color, 4.0f);
+    draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max, fill_color,
+                             4.0f);
     draw_list->AddRect(screen_rect.Min, screen_rect.Max, active_border, 4.0f, 0,
                        thickness);
-    draw_list->AddText(ImVec2(screen_rect.Min.x + 8.0f, screen_rect.Min.y + 8.0f),
-                       active_border, area.name.c_str());
+    draw_list->AddText(
+        ImVec2(screen_rect.Min.x + 8.0f, screen_rect.Min.y + 8.0f),
+        active_border, area.name.c_str());
 
     if (selected && HasWorkingAreaFlag(area.flags, WorkingAreaFlagResizable)) {
       const ImRect handle_rect(
@@ -292,9 +453,9 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
 
     const ImRect screen_rect(
         WorldToScreen(state, canvas_rect.Min, area.origin),
-        WorldToScreen(state, canvas_rect.Min,
-                      ImVec2(area.origin.x + area.size.x,
-                             area.origin.y + area.size.y)));
+        WorldToScreen(
+            state, canvas_rect.Min,
+            ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y)));
     draw_list->AddRect(screen_rect.Min, screen_rect.Max, export_outline, 0.0f,
                        0, 1.0f);
   }
@@ -364,7 +525,8 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
   draw_list->AddRectFilled(rect.Min, rect.Max, background);
 
   const float pixels_per_unit =
-      UnitsToPixels(1.0f, state.ruler_unit, state.calibration) * state.view.zoom;
+      UnitsToPixels(1.0f, state.ruler_unit, state.calibration) *
+      state.view.zoom;
   if (pixels_per_unit <= 0.0f) {
     return;
   }
@@ -492,6 +654,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   const bool canvas_hovered = canvas_rect.Contains(io.MousePos);
   const bool top_ruler_hovered = top_ruler_rect.Contains(io.MousePos);
   const bool left_ruler_hovered = left_ruler_rect.Contains(io.MousePos);
+  const ImportedArtworkHit imported_artwork_hit =
+      FindHoveredImportedArtwork(state, canvas_rect.Min, canvas_rect,
+                                 io.MousePos, options.resize_handle_size);
   const WorkingAreaHit area_hit =
       FindHoveredWorkingArea(state, canvas_rect.Min, canvas_rect, io.MousePos,
                              options.resize_handle_size);
@@ -503,8 +668,10 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   }
 
   if (canvas_hovered && io.MouseWheel != 0.0f) {
-    const ImVec2 focus_world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
-    state.view.zoom = ClampZoom(state.view.zoom * std::pow(1.15f, io.MouseWheel));
+    const ImVec2 focus_world =
+        ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+    state.view.zoom =
+        ClampZoom(state.view.zoom * std::pow(1.15f, io.MouseWheel));
     state.view.pan = ImVec2(
         io.MousePos.x - canvas_rect.Min.x - focus_world.x * state.view.zoom,
         io.MousePos.y - canvas_rect.Min.y - focus_world.y * state.view.zoom);
@@ -527,8 +694,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   if (transient_state.creating_guide) {
     const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
     const float raw_position =
-        transient_state.pending_orientation == GuideOrientation::Vertical ? world.x
-                                                                         : world.y;
+        transient_state.pending_orientation == GuideOrientation::Vertical
+            ? world.x
+            : world.y;
     transient_state.pending_position =
         SnapAxisCoordinate(state, transient_state.pending_orientation,
                            raw_position)
@@ -549,9 +717,32 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
           guide != nullptr && !guide->locked) {
         transient_state.dragging_guide_id = hovered_guide_id;
       }
+    } else if (imported_artwork_hit.id != 0) {
+      state.selected_imported_artwork_id = imported_artwork_hit.id;
+      transient_state.selected_working_area_id = 0;
+      if (ImportedArtwork *artwork =
+              FindImportedArtwork(state, imported_artwork_hit.id);
+          artwork != nullptr) {
+        const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+        if (imported_artwork_hit.zone == ImportedArtworkHitZone::ResizeHandle &&
+            HasImportedArtworkFlag(artwork->flags,
+                                   ImportedArtworkFlagResizable)) {
+          transient_state.resizing_imported_artwork_id =
+              imported_artwork_hit.id;
+        } else if (imported_artwork_hit.zone == ImportedArtworkHitZone::Body &&
+                   HasImportedArtworkFlag(artwork->flags,
+                                          ImportedArtworkFlagMovable)) {
+          transient_state.dragging_imported_artwork_id =
+              imported_artwork_hit.id;
+          transient_state.imported_artwork_drag_offset =
+              ImVec2(world.x - artwork->origin.x, world.y - artwork->origin.y);
+        }
+      }
     } else if (area_hit.id != 0) {
       transient_state.selected_working_area_id = area_hit.id;
-      if (WorkingArea *area = FindWorkingArea(state, area_hit.id); area != nullptr) {
+      state.selected_imported_artwork_id = 0;
+      if (WorkingArea *area = FindWorkingArea(state, area_hit.id);
+          area != nullptr) {
         const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
         if (area_hit.zone == WorkingAreaHitZone::ResizeHandle &&
             HasWorkingAreaFlag(area->flags, WorkingAreaFlagResizable)) {
@@ -564,6 +755,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         }
       }
     } else {
+      state.selected_imported_artwork_id = 0;
       transient_state.selected_working_area_id = 0;
     }
   }
@@ -574,13 +766,53 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
           guide != nullptr) {
         const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
         const float raw_position =
-            guide->orientation == GuideOrientation::Vertical ? world.x : world.y;
+            guide->orientation == GuideOrientation::Vertical ? world.x
+                                                             : world.y;
         guide->position = SnapAxisCoordinate(state, guide->orientation,
                                              raw_position, guide->id)
                               .value;
       }
     } else {
       transient_state.dragging_guide_id = 0;
+    }
+  }
+
+  if (transient_state.dragging_imported_artwork_id != 0) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      if (ImportedArtwork *artwork = FindImportedArtwork(
+              state, transient_state.dragging_imported_artwork_id);
+          artwork != nullptr) {
+        const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+        ImVec2 new_origin(
+            world.x - transient_state.imported_artwork_drag_offset.x,
+            world.y - transient_state.imported_artwork_drag_offset.y);
+        new_origin = SnapPoint(state, new_origin);
+        artwork->origin = new_origin;
+      }
+    } else {
+      transient_state.dragging_imported_artwork_id = 0;
+    }
+  }
+
+  if (transient_state.resizing_imported_artwork_id != 0) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      if (ImportedArtwork *artwork = FindImportedArtwork(
+              state, transient_state.resizing_imported_artwork_id);
+          artwork != nullptr) {
+        ImVec2 bottom_right = SnapPoint(
+            state, ScreenToWorld(state, canvas_rect.Min, io.MousePos));
+        bottom_right.x = std::max(
+            bottom_right.x, artwork->origin.x + options.min_working_area_size);
+        bottom_right.y = std::max(
+            bottom_right.y, artwork->origin.y + options.min_working_area_size);
+        const ImVec2 local_size = ImportedArtworkLocalSize(*artwork);
+        const ImVec2 target_size(bottom_right.x - artwork->origin.x,
+                                 bottom_right.y - artwork->origin.y);
+        artwork->scale = ImVec2(std::max(target_size.x / local_size.x, 0.01f),
+                                std::max(target_size.y / local_size.y, 0.01f));
+      }
+    } else {
+      transient_state.resizing_imported_artwork_id = 0;
     }
   }
 
@@ -606,12 +838,12 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       if (WorkingArea *area =
               FindWorkingArea(state, transient_state.resizing_working_area_id);
           area != nullptr) {
-        ImVec2 bottom_right =
-            SnapPoint(state, ScreenToWorld(state, canvas_rect.Min, io.MousePos));
-        bottom_right.x = std::max(bottom_right.x,
-                                  area->origin.x + options.min_working_area_size);
-        bottom_right.y = std::max(bottom_right.y,
-                                  area->origin.y + options.min_working_area_size);
+        ImVec2 bottom_right = SnapPoint(
+            state, ScreenToWorld(state, canvas_rect.Min, io.MousePos));
+        bottom_right.x = std::max(
+            bottom_right.x, area->origin.x + options.min_working_area_size);
+        bottom_right.y = std::max(
+            bottom_right.y, area->origin.y + options.min_working_area_size);
         area->size = ImVec2(bottom_right.x - area->origin.x,
                             bottom_right.y - area->origin.y);
         SyncExportAreaFromWorkingArea(state, area->id);
@@ -621,7 +853,13 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     }
   }
 
-  if (hovered_guide_id != 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  if (imported_artwork_hit.id != 0 &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    transient_state.context_imported_artwork_id = imported_artwork_hit.id;
+    state.selected_imported_artwork_id = imported_artwork_hit.id;
+    ImGui::OpenPopup("imported_artwork_context_menu");
+  } else if (hovered_guide_id != 0 &&
+             ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     transient_state.context_guide_id = hovered_guide_id;
     ImGui::OpenPopup("guide_context_menu");
   } else if ((top_ruler_hovered || left_ruler_hovered) &&
@@ -631,9 +869,11 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     ImGui::OpenPopup("canvas_context_menu");
   }
 
+  DrawGrid(draw_list, state, canvas_rect);
   DrawWorkingAreas(draw_list, state, canvas_rect,
                    transient_state.selected_working_area_id, options);
-  DrawGrid(draw_list, state, canvas_rect);
+  DrawImportedArtwork(draw_list, state, canvas_rect,
+                      state.selected_imported_artwork_id, options);
   DrawGuides(draw_list, state, canvas_rect, hovered_guide_id, transient_state);
   DrawRulerAxis(draw_list, state, top_ruler_rect, true);
   DrawRulerAxis(draw_list, state, left_ruler_rect, false);
@@ -650,12 +890,44 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   if (ImGui::BeginPopup("ruler_context_menu")) {
     ImGui::TextUnformatted("Ruler Units");
     ImGui::Separator();
-    for (MeasurementUnit unit : {MeasurementUnit::Millimeters,
-                                 MeasurementUnit::Inches,
-                                 MeasurementUnit::Pixels}) {
+    for (MeasurementUnit unit :
+         {MeasurementUnit::Millimeters, MeasurementUnit::Inches,
+          MeasurementUnit::Pixels}) {
       const bool selected = state.ruler_unit == unit;
       if (ImGui::MenuItem(MeasurementUnitLabel(unit), nullptr, selected)) {
         state.ruler_unit = unit;
+      }
+    }
+    ImGui::EndPopup();
+  }
+
+  if (ImGui::BeginPopup("imported_artwork_context_menu")) {
+    if (ImportedArtwork *artwork = FindImportedArtwork(
+            state, transient_state.context_imported_artwork_id);
+        artwork != nullptr) {
+      if (ImGui::MenuItem("Flip Horizontal")) {
+        FlipImportedArtworkHorizontal(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Flip Vertical")) {
+        FlipImportedArtworkVertical(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Rotate 90 CW")) {
+        RotateImportedArtworkClockwise(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Rotate 90 CCW")) {
+        RotateImportedArtworkCounterClockwise(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Delete")) {
+        DeleteImportedArtwork(state, artwork->id);
+        transient_state.context_imported_artwork_id = 0;
+        transient_state.dragging_imported_artwork_id = 0;
+        transient_state.resizing_imported_artwork_id = 0;
+        ImGui::CloseCurrentPopup();
       }
     }
     ImGui::EndPopup();

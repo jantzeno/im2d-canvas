@@ -1,12 +1,20 @@
 #include "demo_app.h"
 
+#include "demo_imported_artwork_windows.h"
+
+#include "demo_sample_browser.h"
+
 #include "../canvas/im2d_canvas.h"
+#include "../common/im2d_log.h"
+#include "../import/im2d_import.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
 
-#include <cstdio>
+#include <filesystem>
 #include <stdexcept>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -55,6 +63,14 @@ void InitializeDxfState(CanvasState &state) {
 }
 
 void DrawDxfInspector(CanvasState &state) {
+  static demo::SampleBrowserState browser_state;
+  static im2d::importer::ImportResult last_import_result;
+  fs::path clicked_path;
+  if (demo::DrawSampleBrowserWindow("DXF Samples", fs::path("samples") / "dxf",
+                                    {".dxf"}, browser_state, &clicked_path)) {
+    last_import_result = im2d::importer::ImportDxfFile(state, clicked_path);
+  }
+
   ImGui::Begin("DXF Import Demo");
   ImGui::TextUnformatted(
       "Prepared for machine-bed and drawing-unit workflows.");
@@ -96,7 +112,15 @@ void DrawDxfInspector(CanvasState &state) {
               static_cast<int>(state.working_areas.size()));
   ImGui::Text("Export Areas: %d", static_cast<int>(state.export_areas.size()));
   ImGui::Text("Layers: %d", static_cast<int>(state.layers.size()));
+  ImGui::Text("Artwork: %d", static_cast<int>(state.imported_artwork.size()));
+  if (!last_import_result.message.empty()) {
+    ImGui::Separator();
+    demo::DrawImportResultSummary(last_import_result);
+  }
   ImGui::End();
+
+  demo::DrawImportedArtworkListWindow(state, "DXF Canvas Objects");
+  demo::DrawImportedArtworkInspectorWindow(state, "DXF Object Inspector");
 }
 
 } // namespace
@@ -111,7 +135,8 @@ int main(int, char **) {
     config.clear_color = ImVec4(0.08f, 0.06f, 0.05f, 1.0f);
     return demo::RunDemoApp(config);
   } catch (const std::exception &error) {
-    std::fprintf(stderr, "%s\n", error.what());
+    im2d::log::InitializeLogger();
+    im2d::log::GetLogger()->critical("{}", error.what());
   }
 
   SDL_Quit();

@@ -1,12 +1,20 @@
 #include "demo_app.h"
 
+#include "demo_imported_artwork_windows.h"
+
+#include "demo_sample_browser.h"
+
 #include "../canvas/im2d_canvas.h"
+#include "../common/im2d_log.h"
+#include "../import/im2d_import.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
 
-#include <cstdio>
+#include <filesystem>
 #include <stdexcept>
+
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -40,6 +48,14 @@ void InitializeSvgState(CanvasState &state) {
 }
 
 void DrawSvgInspector(CanvasState &state) {
+  static demo::SampleBrowserState browser_state;
+  static im2d::importer::ImportResult last_import_result;
+  fs::path clicked_path;
+  if (demo::DrawSampleBrowserWindow("SVG Samples", fs::path("samples") / "svg",
+                                    {".svg"}, browser_state, &clicked_path)) {
+    last_import_result = im2d::importer::ImportSvgFile(state, clicked_path);
+  }
+
   ImGui::Begin("SVG Import Demo");
   ImGui::TextUnformatted("Prepared for viewport and artboard experiments.");
   ImGui::TextUnformatted("Sample assets live under samples/svg.");
@@ -73,7 +89,15 @@ void DrawSvgInspector(CanvasState &state) {
               static_cast<int>(state.working_areas.size()));
   ImGui::Text("Export Areas: %d", static_cast<int>(state.export_areas.size()));
   ImGui::Text("Guides: %d", static_cast<int>(state.guides.size()));
+  ImGui::Text("Artwork: %d", static_cast<int>(state.imported_artwork.size()));
+  if (!last_import_result.message.empty()) {
+    ImGui::Separator();
+    demo::DrawImportResultSummary(last_import_result);
+  }
   ImGui::End();
+
+  demo::DrawImportedArtworkListWindow(state, "SVG Canvas Objects");
+  demo::DrawImportedArtworkInspectorWindow(state, "SVG Object Inspector");
 }
 
 } // namespace
@@ -88,7 +112,8 @@ int main(int, char **) {
     config.clear_color = ImVec4(0.05f, 0.07f, 0.10f, 1.0f);
     return demo::RunDemoApp(config);
   } catch (const std::exception &error) {
-    std::fprintf(stderr, "%s\n", error.what());
+    im2d::log::InitializeLogger();
+    im2d::log::GetLogger()->critical("{}", error.what());
   }
 
   SDL_Quit();

@@ -40,6 +40,22 @@ constexpr bool HasWorkingAreaFlag(uint32_t flags, WorkingAreaFlags flag) {
   return (flags & static_cast<uint32_t>(flag)) != 0;
 }
 
+enum ImportedArtworkFlags : uint32_t {
+  ImportedArtworkFlagNone = 0,
+  ImportedArtworkFlagMovable = 1u << 0,
+  ImportedArtworkFlagResizable = 1u << 1,
+  ImportedArtworkFlagLockScaleRatio = 1u << 2,
+};
+
+constexpr uint32_t kDefaultImportedArtworkFlags =
+    static_cast<uint32_t>(ImportedArtworkFlagMovable) |
+    static_cast<uint32_t>(ImportedArtworkFlagResizable);
+
+constexpr bool HasImportedArtworkFlag(uint32_t flags,
+                                      ImportedArtworkFlags flag) {
+  return (flags & static_cast<uint32_t>(flag)) != 0;
+}
+
 struct CanvasTheme {
   ImVec4 canvas_background = ImVec4(0.12f, 0.13f, 0.15f, 1.0f);
   ImVec4 ruler_background = ImVec4(0.16f, 0.17f, 0.20f, 1.0f);
@@ -115,6 +131,50 @@ struct Layer {
   bool locked = false;
 };
 
+enum class ImportedPathSegmentKind {
+  Line,
+  CubicBezier,
+};
+
+struct ImportedPathSegment {
+  ImportedPathSegmentKind kind = ImportedPathSegmentKind::Line;
+  ImVec2 start = ImVec2(0.0f, 0.0f);
+  ImVec2 control1 = ImVec2(0.0f, 0.0f);
+  ImVec2 control2 = ImVec2(0.0f, 0.0f);
+  ImVec2 end = ImVec2(0.0f, 0.0f);
+};
+
+enum ImportedPathFlags : uint32_t {
+  ImportedPathFlagNone = 0,
+  ImportedPathFlagTextPlaceholder = 1u << 0,
+};
+
+constexpr bool HasImportedPathFlag(uint32_t flags, ImportedPathFlags flag) {
+  return (flags & static_cast<uint32_t>(flag)) != 0;
+}
+
+struct ImportedPath {
+  std::vector<ImportedPathSegment> segments;
+  ImVec4 stroke_color = ImVec4(0.92f, 0.94f, 0.97f, 1.0f);
+  float stroke_width = 1.0f;
+  bool closed = false;
+  uint32_t flags = ImportedPathFlagNone;
+};
+
+struct ImportedArtwork {
+  int id = 0;
+  std::string name;
+  std::string source_path;
+  std::string source_format;
+  ImVec2 origin = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
+  ImVec2 scale = ImVec2(1.0f, 1.0f);
+  std::vector<ImportedPath> paths;
+  bool visible = true;
+  uint32_t flags = kDefaultImportedArtworkFlags;
+};
+
 struct CanvasState {
   CanvasTheme theme;
   GridSettings grid;
@@ -126,10 +186,14 @@ struct CanvasState {
   std::vector<WorkingArea> working_areas;
   std::vector<ExportArea> export_areas;
   std::vector<Layer> layers;
+  std::vector<ImportedArtwork> imported_artwork;
+  bool show_imported_dxf_text = true;
+  int selected_imported_artwork_id = 0;
   int next_guide_id = 1;
   int next_working_area_id = 1;
   int next_export_area_id = 1;
   int next_layer_id = 1;
+  int next_imported_artwork_id = 1;
 };
 
 struct CanvasWidgetOptions {

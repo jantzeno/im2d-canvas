@@ -1,12 +1,13 @@
 #include "demo_app.h"
 
+#include "../common/im2d_log.h"
+
 #include "../canvas/im2d_canvas.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
 
 #include <array>
-#include <cstdio>
 #include <exception>
 #include <string>
 
@@ -188,7 +189,8 @@ int main(int, char **) {
     config.draw_inspector = DrawInspector;
     return demo::RunDemoApp(config);
   } catch (const std::exception &error) {
-    std::fprintf(stderr, "%s\n", error.what());
+    im2d::log::InitializeLogger();
+    im2d::log::GetLogger()->critical("{}", error.what());
   }
 
   SDL_Quit();
