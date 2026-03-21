@@ -2,6 +2,7 @@
 .xmake/
 build/
 vendor/
+samples/
 
 # IDEs
 .vscode/
