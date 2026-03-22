@@ -155,6 +155,19 @@ constexpr bool HasImportedPathFlag(uint32_t flags, ImportedPathFlags flag) {
   return (flags & static_cast<uint32_t>(flag)) != 0;
 }
 
+enum ImportedElementIssueFlags : uint32_t {
+  ImportedElementIssueFlagNone = 0,
+  ImportedElementIssueFlagOpenGeometry = 1u << 0,
+  ImportedElementIssueFlagPlaceholderText = 1u << 1,
+  ImportedElementIssueFlagOrphanHole = 1u << 2,
+  ImportedElementIssueFlagAmbiguousCleanup = 1u << 3,
+};
+
+constexpr bool HasImportedElementIssueFlag(uint32_t flags,
+                                           ImportedElementIssueFlags flag) {
+  return (flags & static_cast<uint32_t>(flag)) != 0;
+}
+
 enum class ImportedDebugSelectionKind {
   None,
   Artwork,
@@ -185,17 +198,65 @@ struct ImportedElementSelection {
   int item_id = 0;
 };
 
+struct ImportedSourceReference {
+  int source_artwork_id = 0;
+  ImportedElementKind kind = ImportedElementKind::Path;
+  int item_id = 0;
+};
+
+struct ImportedContourReference {
+  ImportedElementKind kind = ImportedElementKind::Path;
+  int item_id = 0;
+  int contour_index = 0;
+};
+
+struct ImportedHoleOwnership {
+  ImportedContourReference outer;
+  ImportedContourReference hole;
+};
+
 struct ImportedArtworkOperationResult {
   bool success = false;
   int artwork_id = 0;
   int created_artwork_id = 0;
+  int part_id = 0;
   int selected_count = 0;
   int moved_count = 0;
   int skipped_count = 0;
   int stitched_count = 0;
+  int cleaned_count = 0;
+  int ambiguous_count = 0;
+  int placeholder_count = 0;
+  int outer_count = 0;
+  int hole_count = 0;
+  int island_count = 0;
+  int attached_hole_count = 0;
+  int orphan_hole_count = 0;
   int closed_count = 0;
   int open_count = 0;
+  bool cut_ready = false;
+  bool nest_ready = false;
   std::string message;
+};
+
+struct ImportedArtworkPartMetadata {
+  int part_id = 0;
+  int source_artwork_id = 0;
+  std::vector<int> contributing_source_artwork_ids;
+  std::vector<ImportedContourReference> outer_contours;
+  std::vector<ImportedHoleOwnership> hole_attachments;
+  std::vector<ImportedContourReference> orphan_holes;
+  int outer_contour_count = 0;
+  int hole_contour_count = 0;
+  int island_count = 0;
+  int attached_hole_count = 0;
+  int orphan_hole_count = 0;
+  int ambiguous_contour_count = 0;
+  int closed_contour_count = 0;
+  int open_contour_count = 0;
+  int placeholder_count = 0;
+  bool cut_ready = false;
+  bool nest_ready = false;
 };
 
 struct ImportedGroup {
@@ -274,6 +335,8 @@ struct ImportedDxfText {
   bool placeholder_only = false;
   ImVec4 stroke_color = ImVec4(0.92f, 0.94f, 0.97f, 1.0f);
   float stroke_width = 1.0f;
+  uint32_t issue_flags = ImportedElementIssueFlagNone;
+  std::vector<ImportedSourceReference> provenance;
   std::vector<ImportedTextGlyph> glyphs;
   std::vector<ImportedTextContour> placeholder_contours;
 };
@@ -287,6 +350,8 @@ struct ImportedPath {
   std::vector<ImportedPathSegment> segments;
   ImVec4 stroke_color = ImVec4(0.92f, 0.94f, 0.97f, 1.0f);
   float stroke_width = 1.0f;
+  uint32_t issue_flags = ImportedElementIssueFlagNone;
+  std::vector<ImportedSourceReference> provenance;
   bool closed = false;
   uint32_t flags = ImportedPathFlagNone;
 };
@@ -307,6 +372,7 @@ struct ImportedArtwork {
   std::vector<ImportedGroup> groups;
   std::vector<ImportedPath> paths;
   std::vector<ImportedDxfText> dxf_text;
+  ImportedArtworkPartMetadata part;
   bool visible = true;
   uint32_t flags = kDefaultImportedArtworkFlags;
 };
@@ -330,11 +396,14 @@ struct CanvasState {
       ImportedArtworkEditMode::None;
   std::vector<ImportedElementSelection> selected_imported_elements;
   ImportedArtworkOperationResult last_imported_artwork_operation;
+  int last_imported_operation_issue_artwork_id = 0;
+  std::vector<ImportedElementSelection> last_imported_operation_issue_elements;
   int next_guide_id = 1;
   int next_working_area_id = 1;
   int next_export_area_id = 1;
   int next_layer_id = 1;
   int next_imported_artwork_id = 1;
+  int next_imported_part_id = 1;
 };
 
 struct CanvasWidgetOptions {

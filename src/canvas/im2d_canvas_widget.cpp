@@ -126,6 +126,22 @@ ImRect ImportedElementScreenRect(const CanvasState &state,
   return WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
 }
 
+ImU32 ImportedIssueOverlayColor(uint32_t issue_flags) {
+  if (HasImportedElementIssueFlag(issue_flags,
+                                  ImportedElementIssueFlagAmbiguousCleanup)) {
+    return IM_COL32(62, 176, 166, 255);
+  }
+  if (HasImportedElementIssueFlag(issue_flags,
+                                  ImportedElementIssueFlagOrphanHole)) {
+    return IM_COL32(232, 84, 62, 255);
+  }
+  if (HasImportedElementIssueFlag(issue_flags,
+                                  ImportedElementIssueFlagPlaceholderText)) {
+    return IM_COL32(232, 171, 62, 255);
+  }
+  return IM_COL32(240, 146, 61, 255);
+}
+
 bool TryGetImportedDebugScreenRect(const CanvasState &state,
                                    const ImVec2 &canvas_min,
                                    const ImportedArtwork &artwork,
@@ -312,6 +328,20 @@ ImportedArtworkHit FindHoveredImportedArtwork(const CanvasState &state,
   }
 
   return {};
+}
+
+bool IsLastOperationIssueElement(const CanvasState &state, int artwork_id,
+                                 ImportedElementKind kind, int item_id) {
+  if (state.last_imported_operation_issue_artwork_id != artwork_id) {
+    return false;
+  }
+
+  return std::any_of(
+      state.last_imported_operation_issue_elements.begin(),
+      state.last_imported_operation_issue_elements.end(),
+      [kind, item_id](const ImportedElementSelection &selection) {
+        return selection.kind == kind && selection.item_id == item_id;
+      });
 }
 
 void RemoveGuide(CanvasState &state, int guide_id) {
@@ -693,11 +723,16 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_selected);
   const ImU32 element_selection_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.guide_hovered);
+  const ImU32 operation_issue_color = IM_COL32(90, 170, 255, 255);
 
   for (const ImportedArtwork &artwork : state.imported_artwork) {
     if (!artwork.visible) {
       continue;
     }
+
+    const bool show_issue_overlays =
+        artwork.id == selected_imported_artwork_id ||
+        state.selected_imported_debug.artwork_id == artwork.id;
 
     for (const ImportedDxfText &text : artwork.dxf_text) {
       if (text.placeholder_only && artwork.source_format == "DXF" &&
@@ -705,6 +740,22 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
         continue;
       }
       DrawImportedDxfText(draw_list, state, canvas_rect, artwork, text);
+      if (show_issue_overlays &&
+          text.issue_flags != ImportedElementIssueFlagNone) {
+        const ImRect text_rect = ImportedElementScreenRect(
+            state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
+        draw_list->AddRect(text_rect.Min, text_rect.Max,
+                           ImportedIssueOverlayColor(text.issue_flags), 3.0f, 0,
+                           2.0f);
+      }
+      if (show_issue_overlays &&
+          IsLastOperationIssueElement(state, artwork.id,
+                                      ImportedElementKind::DxfText, text.id)) {
+        const ImRect text_rect = ImportedElementScreenRect(
+            state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
+        draw_list->AddRect(text_rect.Min, text_rect.Max, operation_issue_color,
+                           5.0f, 0, 2.0f);
+      }
       if (IsImportedElementSelected(state, artwork.id,
                                     ImportedElementKind::DxfText, text.id)) {
         const ImRect text_rect = ImportedElementScreenRect(
@@ -778,6 +829,23 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
         draw_list->PathStroke(packed_color, path.closed,
                               is_filled_text ? std::max(1.0f, thickness * 0.35f)
                                              : thickness);
+      }
+
+      if (show_issue_overlays &&
+          path.issue_flags != ImportedElementIssueFlagNone) {
+        const ImRect path_rect = ImportedElementScreenRect(
+            state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
+        draw_list->AddRect(path_rect.Min, path_rect.Max,
+                           ImportedIssueOverlayColor(path.issue_flags), 3.0f, 0,
+                           2.0f);
+      }
+      if (show_issue_overlays &&
+          IsLastOperationIssueElement(state, artwork.id,
+                                      ImportedElementKind::Path, path.id)) {
+        const ImRect path_rect = ImportedElementScreenRect(
+            state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
+        draw_list->AddRect(path_rect.Min, path_rect.Max, operation_issue_color,
+                           5.0f, 0, 2.0f);
       }
 
       if (IsImportedElementSelected(state, artwork.id,

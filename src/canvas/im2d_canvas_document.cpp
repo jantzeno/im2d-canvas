@@ -2,6 +2,8 @@
 
 #include "../common/im2d_log.h"
 
+#include <clipper2/clipper.h>
+
 #include "im2d_canvas_units.h"
 
 #include <algorithm>
@@ -17,6 +19,8 @@ namespace {
 constexpr float kMinimumImportedArtworkScale = 0.01f;
 constexpr float kImportedCurveFlatteningTolerance = 12.0f;
 constexpr float kGuideClassificationEpsilon = 0.25f;
+constexpr int kClipperDecimalPrecision = 3;
+constexpr double kMinimumPreparedContourArea = 0.01;
 
 enum class GuideSideClassification {
   Empty,
@@ -38,6 +42,10 @@ float DistanceSquared(const ImVec2 &a, const ImVec2 &b) {
 
 bool PointsNear(const ImVec2 &a, const ImVec2 &b, float tolerance) {
   return DistanceSquared(a, b) <= tolerance * tolerance;
+}
+
+bool NearlyEqual(float a, float b, float epsilon = 0.0001f) {
+  return std::fabs(a - b) <= epsilon;
 }
 
 SelectionRect NormalizeRect(const ImVec2 &a, const ImVec2 &b) {
@@ -172,6 +180,355 @@ void SetLastImportedArtworkOperation(CanvasState &state,
   state.last_imported_artwork_operation = std::move(result);
 }
 
+void SetLastImportedOperationIssueElements(
+    CanvasState &state, int artwork_id,
+    std::vector<ImportedElementSelection> issue_elements) {
+  state.last_imported_operation_issue_artwork_id = artwork_id;
+  state.last_imported_operation_issue_elements = std::move(issue_elements);
+}
+
+bool SameImportedSourceReference(const ImportedSourceReference &a,
+                                 const ImportedSourceReference &b) {
+  return a.source_artwork_id == b.source_artwork_id && a.kind == b.kind &&
+         a.item_id == b.item_id;
+}
+
+bool ImportedSourceReferenceLess(const ImportedSourceReference &a,
+                                 const ImportedSourceReference &b) {
+  if (a.source_artwork_id != b.source_artwork_id) {
+    return a.source_artwork_id < b.source_artwork_id;
+  }
+  if (a.kind != b.kind) {
+    return static_cast<int>(a.kind) < static_cast<int>(b.kind);
+  }
+  return a.item_id < b.item_id;
+}
+
+void NormalizeImportedSourceReferences(
+    std::vector<ImportedSourceReference> *references) {
+  std::sort(references->begin(), references->end(),
+            ImportedSourceReferenceLess);
+  references->erase(std::unique(references->begin(), references->end(),
+                                SameImportedSourceReference),
+                    references->end());
+}
+
+void EnsureImportedPathProvenance(ImportedArtwork &artwork,
+                                  ImportedPath *path) {
+  if (path->provenance.empty()) {
+    path->provenance.push_back(
+        {artwork.part.source_artwork_id, ImportedElementKind::Path, path->id});
+  }
+  NormalizeImportedSourceReferences(&path->provenance);
+}
+
+void EnsureImportedDxfTextProvenance(ImportedArtwork &artwork,
+                                     ImportedDxfText *text) {
+  if (text->provenance.empty()) {
+    text->provenance.push_back({artwork.part.source_artwork_id,
+                                ImportedElementKind::DxfText, text->id});
+  }
+  NormalizeImportedSourceReferences(&text->provenance);
+}
+
+void EnsureImportedArtworkElementProvenance(ImportedArtwork &artwork) {
+  for (ImportedPath &path : artwork.paths) {
+    EnsureImportedPathProvenance(artwork, &path);
+  }
+  for (ImportedDxfText &text : artwork.dxf_text) {
+    EnsureImportedDxfTextProvenance(artwork, &text);
+  }
+}
+
+void EnsureContributingSourceArtworkId(ImportedArtwork &artwork) {
+  if (artwork.part.source_artwork_id == 0) {
+    artwork.part.source_artwork_id = artwork.id;
+  }
+  if (std::find(artwork.part.contributing_source_artwork_ids.begin(),
+                artwork.part.contributing_source_artwork_ids.end(),
+                artwork.part.source_artwork_id) ==
+      artwork.part.contributing_source_artwork_ids.end()) {
+    artwork.part.contributing_source_artwork_ids.push_back(
+        artwork.part.source_artwork_id);
+  }
+}
+
+Clipper2Lib::PathD SampleImportedPathToClipperPath(const ImportedPath &path);
+
+void PopulateOperationReadiness(ImportedArtworkOperationResult *result,
+                                const ImportedArtwork &artwork) {
+  result->part_id = artwork.part.part_id;
+  result->ambiguous_count = artwork.part.ambiguous_contour_count;
+  result->outer_count = artwork.part.outer_contour_count;
+  result->hole_count = artwork.part.hole_contour_count;
+  result->island_count = artwork.part.island_count;
+  result->attached_hole_count = artwork.part.attached_hole_count;
+  result->orphan_hole_count = artwork.part.orphan_hole_count;
+  result->closed_count = artwork.part.closed_contour_count;
+  result->open_count = artwork.part.open_contour_count;
+  result->placeholder_count = artwork.part.placeholder_count;
+  result->cut_ready = artwork.part.cut_ready;
+  result->nest_ready = artwork.part.nest_ready;
+}
+
+struct ClosedContourCandidate {
+  bool is_hole = false;
+  ImportedElementKind owner_kind = ImportedElementKind::Path;
+  int owner_item_id = 0;
+  int contour_index = 0;
+  Clipper2Lib::PathD polygon;
+  Clipper2Lib::RectD bounds;
+  double area = 0.0;
+};
+
+void AppendClosedContourCandidate(const Clipper2Lib::PathD &polygon,
+                                  bool is_hole, ImportedElementKind owner_kind,
+                                  int owner_item_id, int contour_index,
+                                  std::vector<ClosedContourCandidate> *out) {
+  if (polygon.size() < 3) {
+    return;
+  }
+  const double area = std::fabs(Clipper2Lib::Area(polygon));
+  if (area < kMinimumPreparedContourArea) {
+    return;
+  }
+  out->push_back({is_hole, owner_kind, owner_item_id, contour_index, polygon,
+                  Clipper2Lib::GetBounds(polygon), area});
+}
+
+Clipper2Lib::PathD
+SampleImportedTextContourToClipperPath(const ImportedTextContour &contour) {
+  std::vector<ImVec2> sampled_points;
+  AppendSampledSegmentPointsLocal(contour.segments, &sampled_points);
+  if (sampled_points.size() > 1 &&
+      PointsNear(sampled_points.front(), sampled_points.back(), 0.0001f)) {
+    sampled_points.pop_back();
+  }
+
+  Clipper2Lib::PathD clipper_path;
+  clipper_path.reserve(sampled_points.size());
+  for (const ImVec2 &point : sampled_points) {
+    clipper_path.emplace_back(static_cast<double>(point.x),
+                              static_cast<double>(point.y));
+  }
+  return clipper_path;
+}
+
+bool RectContainsRect(const Clipper2Lib::RectD &outer,
+                      const Clipper2Lib::RectD &inner) {
+  return inner.left >= outer.left && inner.top >= outer.top &&
+         inner.right <= outer.right && inner.bottom <= outer.bottom;
+}
+
+bool OuterContainsHole(const ClosedContourCandidate &outer,
+                       const ClosedContourCandidate &hole) {
+  if (!RectContainsRect(outer.bounds, hole.bounds) || hole.polygon.empty()) {
+    return false;
+  }
+  const Clipper2Lib::PointD test_point = hole.polygon.front();
+  const auto containment =
+      Clipper2Lib::PointInPolygon(test_point, outer.polygon);
+  return containment == Clipper2Lib::PointInPolygonResult::IsInside ||
+         containment == Clipper2Lib::PointInPolygonResult::IsOn;
+}
+
+ImportedContourReference
+MakeContourReference(const ClosedContourCandidate &candidate) {
+  return {candidate.owner_kind, candidate.owner_item_id,
+          candidate.contour_index};
+}
+
+double SampleImportedPathSignedArea(const ImportedPath &path) {
+  if (!path.closed || path.segments.empty()) {
+    return 0.0;
+  }
+
+  Clipper2Lib::PathD polygon = SampleImportedPathToClipperPath(path);
+  if (polygon.size() < 3) {
+    return 0.0;
+  }
+  return Clipper2Lib::Area(polygon);
+}
+
+bool ImportedPathActsAsHole(const ImportedPath &path) {
+  if (HasImportedPathFlag(path.flags, ImportedPathFlagHoleContour)) {
+    return true;
+  }
+  if (!path.closed) {
+    return false;
+  }
+  return SampleImportedPathSignedArea(path) < 0.0;
+}
+
+void RecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
+  constexpr uint32_t kPersistentPathIssueFlags =
+      static_cast<uint32_t>(ImportedElementIssueFlagAmbiguousCleanup);
+
+  artwork.part.outer_contours.clear();
+  artwork.part.hole_attachments.clear();
+  artwork.part.orphan_holes.clear();
+  artwork.part.outer_contour_count = 0;
+  artwork.part.hole_contour_count = 0;
+  artwork.part.island_count = 0;
+  artwork.part.attached_hole_count = 0;
+  artwork.part.orphan_hole_count = 0;
+  artwork.part.ambiguous_contour_count = 0;
+  artwork.part.closed_contour_count = 0;
+  artwork.part.open_contour_count = 0;
+  artwork.part.placeholder_count = 0;
+  std::vector<ClosedContourCandidate> closed_contours;
+
+  const auto mark_item_issue = [&](ImportedElementKind kind, int item_id,
+                                   ImportedElementIssueFlags flag) {
+    if (kind == ImportedElementKind::Path) {
+      for (ImportedPath &path : artwork.paths) {
+        if (path.id == item_id) {
+          path.issue_flags |= static_cast<uint32_t>(flag);
+          return;
+        }
+      }
+      return;
+    }
+
+    for (ImportedDxfText &text : artwork.dxf_text) {
+      if (text.id == item_id) {
+        text.issue_flags |= static_cast<uint32_t>(flag);
+        return;
+      }
+    }
+  };
+
+  for (ImportedPath &path : artwork.paths) {
+    path.issue_flags &= kPersistentPathIssueFlags;
+    if (HasImportedElementIssueFlag(path.issue_flags,
+                                    ImportedElementIssueFlagAmbiguousCleanup)) {
+      artwork.part.ambiguous_contour_count += 1;
+    }
+  }
+  for (ImportedDxfText &text : artwork.dxf_text) {
+    text.issue_flags = ImportedElementIssueFlagNone;
+  }
+
+  for (ImportedPath &path : artwork.paths) {
+    if (path.segments.empty()) {
+      continue;
+    }
+    if (path.closed) {
+      const bool is_hole = ImportedPathActsAsHole(path);
+      artwork.part.closed_contour_count += 1;
+      if (is_hole) {
+        artwork.part.hole_contour_count += 1;
+      } else {
+        artwork.part.outer_contour_count += 1;
+      }
+      AppendClosedContourCandidate(SampleImportedPathToClipperPath(path),
+                                   is_hole, ImportedElementKind::Path, path.id,
+                                   0, &closed_contours);
+    } else {
+      artwork.part.open_contour_count += 1;
+      path.issue_flags |= ImportedElementIssueFlagOpenGeometry;
+    }
+  }
+
+  for (ImportedDxfText &text : artwork.dxf_text) {
+    int contour_index = 0;
+    if (text.placeholder_only) {
+      artwork.part.placeholder_count += 1;
+      text.issue_flags |= ImportedElementIssueFlagPlaceholderText;
+    }
+
+    for (const ImportedTextGlyph &glyph : text.glyphs) {
+      for (const ImportedTextContour &contour : glyph.contours) {
+        if (contour.role == ImportedTextContourRole::Guide ||
+            contour.segments.empty()) {
+          continue;
+        }
+        if (contour.closed) {
+          const bool is_hole = contour.role == ImportedTextContourRole::Hole;
+          artwork.part.closed_contour_count += 1;
+          if (is_hole) {
+            artwork.part.hole_contour_count += 1;
+          } else {
+            artwork.part.outer_contour_count += 1;
+          }
+          AppendClosedContourCandidate(
+              SampleImportedTextContourToClipperPath(contour), is_hole,
+              ImportedElementKind::DxfText, text.id, contour_index,
+              &closed_contours);
+        } else {
+          artwork.part.open_contour_count += 1;
+          text.issue_flags |= ImportedElementIssueFlagOpenGeometry;
+        }
+        contour_index += 1;
+      }
+    }
+
+    for (const ImportedTextContour &contour : text.placeholder_contours) {
+      if (contour.role == ImportedTextContourRole::Guide ||
+          contour.segments.empty()) {
+        continue;
+      }
+      if (contour.closed) {
+        const bool is_hole = contour.role == ImportedTextContourRole::Hole;
+        artwork.part.closed_contour_count += 1;
+        if (is_hole) {
+          artwork.part.hole_contour_count += 1;
+        } else {
+          artwork.part.outer_contour_count += 1;
+        }
+        AppendClosedContourCandidate(
+            SampleImportedTextContourToClipperPath(contour), is_hole,
+            ImportedElementKind::DxfText, text.id, contour_index,
+            &closed_contours);
+      } else {
+        artwork.part.open_contour_count += 1;
+        text.issue_flags |= ImportedElementIssueFlagOpenGeometry;
+      }
+      contour_index += 1;
+    }
+  }
+
+  std::vector<const ClosedContourCandidate *> outers;
+  std::vector<const ClosedContourCandidate *> holes;
+  for (const ClosedContourCandidate &candidate : closed_contours) {
+    if (candidate.is_hole) {
+      holes.push_back(&candidate);
+    } else {
+      outers.push_back(&candidate);
+      artwork.part.outer_contours.push_back(MakeContourReference(candidate));
+    }
+  }
+  artwork.part.island_count = static_cast<int>(outers.size());
+
+  for (const ClosedContourCandidate *hole : holes) {
+    const ClosedContourCandidate *best_outer = nullptr;
+    for (const ClosedContourCandidate *outer : outers) {
+      if (!OuterContainsHole(*outer, *hole)) {
+        continue;
+      }
+      if (best_outer == nullptr || outer->area < best_outer->area) {
+        best_outer = outer;
+      }
+    }
+    if (best_outer != nullptr) {
+      artwork.part.attached_hole_count += 1;
+      artwork.part.hole_attachments.push_back(
+          {MakeContourReference(*best_outer), MakeContourReference(*hole)});
+    } else {
+      artwork.part.orphan_hole_count += 1;
+      artwork.part.orphan_holes.push_back(MakeContourReference(*hole));
+      mark_item_issue(hole->owner_kind, hole->owner_item_id,
+                      ImportedElementIssueFlagOrphanHole);
+    }
+  }
+
+  artwork.part.cut_ready = artwork.part.outer_contour_count > 0 &&
+                           artwork.part.open_contour_count == 0 &&
+                           artwork.part.placeholder_count == 0 &&
+                           artwork.part.orphan_hole_count == 0;
+  artwork.part.nest_ready = artwork.part.cut_ready;
+}
+
 void ResetImportedArtworkCounters(ImportedArtwork &artwork) {
   int max_group_id = 0;
   int max_path_id = 0;
@@ -272,6 +629,8 @@ ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
   subset.origin = source.origin;
   subset.scale = source.scale;
   subset.root_group_id = source.root_group_id;
+  subset.part = source.part;
+  subset.part.part_id = 0;
   subset.visible = source.visible;
   subset.flags = source.flags;
 
@@ -322,6 +681,7 @@ ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
   ResetImportedArtworkCounters(subset);
   RecomputeImportedArtworkBounds(subset);
   RecomputeImportedHierarchyBounds(subset);
+  RecomputeImportedArtworkPartMetadata(subset);
   return subset;
 }
 
@@ -336,6 +696,89 @@ ImportedPath ReverseImportedPathCopy(const ImportedPath &path) {
     reversed.segments.push_back(segment);
   }
   return reversed;
+}
+
+bool SupportsClipperCleanup(const ImportedPath &path) {
+  return !HasImportedPathFlag(path.flags, ImportedPathFlagTextPlaceholder) &&
+         !HasImportedPathFlag(path.flags, ImportedPathFlagFilledText) &&
+         !HasImportedPathFlag(path.flags, ImportedPathFlagHoleContour);
+}
+
+Clipper2Lib::PathD SampleImportedPathToClipperPath(const ImportedPath &path) {
+  std::vector<ImVec2> sampled_points;
+  AppendSampledSegmentPointsLocal(path.segments, &sampled_points);
+  if (sampled_points.size() > 1 &&
+      PointsNear(sampled_points.front(), sampled_points.back(), 0.0001f)) {
+    sampled_points.pop_back();
+  }
+
+  Clipper2Lib::PathD clipper_path;
+  clipper_path.reserve(sampled_points.size());
+  for (const ImVec2 &point : sampled_points) {
+    clipper_path.emplace_back(static_cast<double>(point.x),
+                              static_cast<double>(point.y));
+  }
+  return clipper_path;
+}
+
+ImportedPath BuildImportedPathFromClipperContour(
+    const Clipper2Lib::PathD &path, const ImportedPath &source, int new_path_id,
+    std::vector<ImportedSourceReference> provenance, uint32_t issue_flags) {
+  ImportedPath imported_path = source;
+  imported_path.id = new_path_id;
+  imported_path.closed = true;
+  imported_path.flags &= ~static_cast<uint32_t>(ImportedPathFlagHoleContour);
+  imported_path.issue_flags = issue_flags;
+  imported_path.provenance = std::move(provenance);
+  NormalizeImportedSourceReferences(&imported_path.provenance);
+  imported_path.segments.clear();
+  imported_path.segments.reserve(path.size());
+
+  for (size_t index = 0; index < path.size(); ++index) {
+    const Clipper2Lib::PointD &start = path[index];
+    const Clipper2Lib::PointD &end = path[(index + 1) % path.size()];
+    ImportedPathSegment segment;
+    segment.kind = ImportedPathSegmentKind::Line;
+    segment.start =
+        ImVec2(static_cast<float>(start.x), static_cast<float>(start.y));
+    segment.end = ImVec2(static_cast<float>(end.x), static_cast<float>(end.y));
+    imported_path.segments.push_back(segment);
+  }
+
+  return imported_path;
+}
+
+struct ClosedCleanupGroup {
+  int parent_group_id = 0;
+  ImportedPath template_path;
+  std::unordered_set<int> source_path_ids;
+  std::vector<ImportedSourceReference> provenance;
+  Clipper2Lib::PathsD clipper_paths;
+  bool requires_clipper_cleanup = false;
+};
+
+bool MatchesCleanupGroup(const ClosedCleanupGroup &group,
+                         const ImportedPath &path) {
+  return group.parent_group_id == path.parent_group_id &&
+         group.template_path.flags == path.flags &&
+         NearlyEqual(group.template_path.stroke_width, path.stroke_width) &&
+         NearlyEqual(group.template_path.stroke_color.x, path.stroke_color.x) &&
+         NearlyEqual(group.template_path.stroke_color.y, path.stroke_color.y) &&
+         NearlyEqual(group.template_path.stroke_color.z, path.stroke_color.z) &&
+         NearlyEqual(group.template_path.stroke_color.w, path.stroke_color.w);
+}
+
+ClosedCleanupGroup *
+FindOrAddCleanupGroup(std::vector<ClosedCleanupGroup> *groups,
+                      const ImportedPath &path) {
+  for (ClosedCleanupGroup &group : *groups) {
+    if (MatchesCleanupGroup(group, path)) {
+      return &group;
+    }
+  }
+
+  groups->push_back({path.parent_group_id, path, {}, {}, {}, false});
+  return &groups->back();
 }
 
 bool TryOrientPathsForMerge(const ImportedPath &first,
@@ -376,9 +819,12 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
   ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
   if (artwork == nullptr) {
     result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
+
+  SetLastImportedOperationIssueElements(state, 0, {});
 
   const int moved_count =
       static_cast<int>(moved_path_ids.size() + moved_text_ids.size());
@@ -404,8 +850,12 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
   ResetImportedArtworkCounters(*artwork);
   RecomputeImportedArtworkBounds(*artwork);
   RecomputeImportedHierarchyBounds(*artwork);
+  RecomputeImportedArtworkPartMetadata(*artwork);
 
   const bool source_empty = artwork->paths.empty() && artwork->dxf_text.empty();
+  if (!source_empty) {
+    artwork->part.part_id = state.next_imported_part_id++;
+  }
   const int created_artwork_id =
       AppendImportedArtwork(state, std::move(subset));
   if (source_empty) {
@@ -419,6 +869,11 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
 
   result.success = true;
   result.created_artwork_id = created_artwork_id;
+  if (const ImportedArtwork *created_artwork =
+          FindImportedArtwork(state, created_artwork_id);
+      created_artwork != nullptr) {
+    PopulateOperationReadiness(&result, *created_artwork);
+  }
   result.message = action_verb + " " + std::to_string(moved_count) +
                    " imported element" +
                    (moved_count == 1 ? std::string() : std::string("s")) +
@@ -927,6 +1382,14 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
   if (artwork.name.empty()) {
     artwork.name = "Artwork " + std::to_string(artwork.id);
   }
+  if (artwork.part.part_id == 0) {
+    artwork.part.part_id = state.next_imported_part_id++;
+  }
+  if (artwork.part.source_artwork_id == 0) {
+    artwork.part.source_artwork_id = artwork.id;
+  }
+  EnsureContributingSourceArtworkId(artwork);
+  EnsureImportedArtworkElementProvenance(artwork);
 
   if (!state.working_areas.empty()) {
     const float stagger =
@@ -936,6 +1399,7 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
   }
 
   RecomputeImportedHierarchyBounds(artwork);
+  RecomputeImportedArtworkPartMetadata(artwork);
 
   state.imported_artwork.push_back(std::move(artwork));
   return state.imported_artwork.back().id;
@@ -1093,9 +1557,12 @@ UpdateImportedArtworkOutlineColor(CanvasState &state, int imported_artwork_id,
   ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
   if (artwork == nullptr) {
     result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
+
+  SetLastImportedOperationIssueElements(state, 0, {});
 
   for (ImportedPath &path : artwork->paths) {
     path.stroke_color = stroke_color;
@@ -1105,6 +1572,7 @@ UpdateImportedArtworkOutlineColor(CanvasState &state, int imported_artwork_id,
   }
 
   result.success = true;
+  PopulateOperationReadiness(&result, *artwork);
   result.message = "Updated outline color for the selected imported artwork.";
   SetLastImportedArtworkOperation(state, result);
   return result;
@@ -1119,10 +1587,14 @@ PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
   ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
   if (artwork == nullptr) {
     result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
 
+  SetLastImportedOperationIssueElements(state, 0, {});
+
+  std::unordered_set<int> newly_closed_path_ids;
   for (ImportedPath &path : artwork->paths) {
     if (path.segments.empty() || path.closed) {
       continue;
@@ -1131,6 +1603,7 @@ PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
                    weld_tolerance)) {
       path.segments.back().end = path.segments.front().start;
       path.closed = true;
+      newly_closed_path_ids.insert(path.id);
     }
   }
 
@@ -1169,6 +1642,7 @@ PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
           oriented_first.segments.back().end =
               oriented_first.segments.front().start;
           oriented_first.closed = true;
+          newly_closed_path_ids.insert(oriented_first.id);
         }
 
         const int removed_path_id = second_path.id;
@@ -1189,6 +1663,118 @@ PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
     }
   }
 
+  std::vector<ClosedCleanupGroup> cleanup_groups;
+  for (const ImportedPath &path : artwork->paths) {
+    if (!path.closed || path.segments.empty() ||
+        !SupportsClipperCleanup(path)) {
+      continue;
+    }
+
+    Clipper2Lib::PathD clipper_path = SampleImportedPathToClipperPath(path);
+    if (clipper_path.size() < 3) {
+      continue;
+    }
+
+    ClosedCleanupGroup *group = FindOrAddCleanupGroup(&cleanup_groups, path);
+    group->source_path_ids.insert(path.id);
+    group->provenance.insert(group->provenance.end(), path.provenance.begin(),
+                             path.provenance.end());
+    group->clipper_paths.push_back(std::move(clipper_path));
+    if (newly_closed_path_ids.contains(path.id)) {
+      group->requires_clipper_cleanup = true;
+    }
+  }
+
+  std::unordered_set<int> replaced_path_ids;
+  std::vector<ImportedPath> cleaned_paths;
+  for (ClosedCleanupGroup &group : cleanup_groups) {
+    if (!group.requires_clipper_cleanup && group.clipper_paths.size() < 2) {
+      continue;
+    }
+
+    Clipper2Lib::PathsD prepared_paths = group.clipper_paths;
+    if (weld_tolerance > 0.0f) {
+      Clipper2Lib::PathsD inflated = Clipper2Lib::InflatePaths(
+          prepared_paths, static_cast<double>(weld_tolerance) * 0.5,
+          Clipper2Lib::JoinType::Round, Clipper2Lib::EndType::Polygon, 2.0,
+          kClipperDecimalPrecision);
+      if (!inflated.empty()) {
+        Clipper2Lib::PathsD deflated = Clipper2Lib::InflatePaths(
+            inflated, static_cast<double>(-weld_tolerance) * 0.5,
+            Clipper2Lib::JoinType::Round, Clipper2Lib::EndType::Polygon, 2.0,
+            kClipperDecimalPrecision);
+        if (!deflated.empty()) {
+          prepared_paths = std::move(deflated);
+        }
+      }
+    }
+
+    Clipper2Lib::PathsD unified_paths =
+        Clipper2Lib::Union(prepared_paths, Clipper2Lib::FillRule::NonZero,
+                           kClipperDecimalPrecision);
+    if (unified_paths.empty()) {
+      continue;
+    }
+
+    std::vector<ImportedPath> group_cleaned_paths;
+    group_cleaned_paths.reserve(unified_paths.size());
+    NormalizeImportedSourceReferences(&group.provenance);
+    const bool ambiguous_cleanup =
+        group.source_path_ids.size() > 1 ||
+        unified_paths.size() != group.source_path_ids.size();
+    const uint32_t output_issue_flags =
+        ambiguous_cleanup
+            ? static_cast<uint32_t>(ImportedElementIssueFlagAmbiguousCleanup)
+            : ImportedElementIssueFlagNone;
+    for (const Clipper2Lib::PathD &unified_path : unified_paths) {
+      if (unified_path.size() < 3 ||
+          std::fabs(Clipper2Lib::Area(unified_path)) <
+              kMinimumPreparedContourArea) {
+        continue;
+      }
+
+      group_cleaned_paths.push_back(BuildImportedPathFromClipperContour(
+          unified_path, group.template_path, artwork->next_path_id++,
+          group.provenance, output_issue_flags));
+    }
+
+    if (group_cleaned_paths.empty()) {
+      continue;
+    }
+
+    for (int source_path_id : group.source_path_ids) {
+      replaced_path_ids.insert(source_path_id);
+    }
+    result.cleaned_count += static_cast<int>(group_cleaned_paths.size());
+    if (ambiguous_cleanup) {
+      result.ambiguous_count += static_cast<int>(group_cleaned_paths.size());
+    }
+    std::move(group_cleaned_paths.begin(), group_cleaned_paths.end(),
+              std::back_inserter(cleaned_paths));
+  }
+
+  if (!replaced_path_ids.empty()) {
+    std::erase_if(artwork->paths,
+                  [&replaced_path_ids](const ImportedPath &path) {
+                    return replaced_path_ids.contains(path.id);
+                  });
+
+    for (ImportedGroup &group : artwork->groups) {
+      std::erase_if(group.path_ids, [&replaced_path_ids](int path_id) {
+        return replaced_path_ids.contains(path_id);
+      });
+    }
+
+    for (ImportedPath &cleaned_path : cleaned_paths) {
+      if (ImportedGroup *group =
+              FindImportedGroup(*artwork, cleaned_path.parent_group_id);
+          group != nullptr) {
+        group->path_ids.push_back(cleaned_path.id);
+      }
+      artwork->paths.push_back(std::move(cleaned_path));
+    }
+  }
+
   for (const ImportedPath &path : artwork->paths) {
     if (path.closed) {
       result.closed_count += 1;
@@ -1199,12 +1785,17 @@ PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
 
   RecomputeImportedArtworkBounds(*artwork);
   RecomputeImportedHierarchyBounds(*artwork);
+  RecomputeImportedArtworkPartMetadata(*artwork);
 
   result.success = true;
+  PopulateOperationReadiness(&result, *artwork);
   result.message = "Prepared imported artwork: stitched " +
-                   std::to_string(result.stitched_count) + ", closed " +
+                   std::to_string(result.stitched_count) + ", cleaned " +
+                   std::to_string(result.cleaned_count) + ", closed " +
                    std::to_string(result.closed_count) + ", open " +
-                   std::to_string(result.open_count) + ".";
+                   std::to_string(result.open_count) + ", placeholder " +
+                   std::to_string(result.placeholder_count) + ", ambiguous " +
+                   std::to_string(result.ambiguous_count) + ".";
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
@@ -1218,17 +1809,20 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
   ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
   if (artwork == nullptr) {
     result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
   if (mode == ImportedArtworkEditMode::None) {
     result.message = "Imported artwork selection mode is not active.";
+    SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
 
   const SelectionRect selection_rect = NormalizeRect(world_start, world_end);
   ClearSelectedImportedElements(state);
+  std::vector<ImportedElementSelection> skipped_elements;
 
   std::vector<ImVec2> sample_points;
   for (const ImportedPath &path : artwork->paths) {
@@ -1247,6 +1841,7 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
           {ImportedElementKind::Path, path.id});
     } else if (inside_count != 0) {
       result.skipped_count += 1;
+      skipped_elements.push_back({ImportedElementKind::Path, path.id});
     }
   }
 
@@ -1266,12 +1861,14 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
           {ImportedElementKind::DxfText, text.id});
     } else if (inside_count != 0) {
       result.skipped_count += 1;
+      skipped_elements.push_back({ImportedElementKind::DxfText, text.id});
     }
   }
 
   result.selected_count =
       static_cast<int>(state.selected_imported_elements.size());
   result.success = result.selected_count > 0;
+  PopulateOperationReadiness(&result, *artwork);
   result.message =
       "Selected " + std::to_string(result.selected_count) +
       " enclosed imported element" +
@@ -1282,6 +1879,8 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
         " crossing element" +
         (result.skipped_count == 1 ? std::string() : std::string("s")) + ".";
   }
+  SetLastImportedOperationIssueElements(state, artwork->id,
+                                        std::move(skipped_elements));
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
@@ -1303,6 +1902,7 @@ ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
       MoveImportedElementsToNewArtwork(state, imported_artwork_id, path_ids,
                                        text_ids, " Extracted", "Extracted");
   result.selected_count = static_cast<int>(path_ids.size() + text_ids.size());
+  SetLastImportedOperationIssueElements(state, 0, {});
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
@@ -1317,6 +1917,7 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
   const Guide *guide = FindGuide(state, guide_id);
   if (artwork == nullptr || guide == nullptr) {
     result.message = "Guide split requires a valid guide and imported artwork.";
+    SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
@@ -1325,6 +1926,7 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
   std::unordered_set<int> positive_text_ids;
   int negative_count = 0;
   std::vector<ImVec2> sample_points;
+  std::vector<ImportedElementSelection> skipped_elements;
 
   for (const ImportedPath &path : artwork->paths) {
     sample_points.clear();
@@ -1338,6 +1940,7 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
       break;
     case GuideSideClassification::Crossing:
       result.skipped_count += 1;
+      skipped_elements.push_back({ImportedElementKind::Path, path.id});
       break;
     case GuideSideClassification::Empty:
       break;
@@ -1356,6 +1959,7 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
       break;
     case GuideSideClassification::Crossing:
       result.skipped_count += 1;
+      skipped_elements.push_back({ImportedElementKind::DxfText, text.id});
       break;
     case GuideSideClassification::Empty:
       break;
@@ -1365,8 +1969,11 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
   const int positive_count =
       static_cast<int>(positive_path_ids.size() + positive_text_ids.size());
   if (positive_count == 0 || negative_count == 0) {
+    PopulateOperationReadiness(&result, *artwork);
     result.message =
         "Guide split needs movable content on both sides of the guide.";
+    SetLastImportedOperationIssueElements(state, artwork->id,
+                                          std::move(skipped_elements));
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
@@ -1379,6 +1986,8 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
   result.message +=
       " Skipped " + std::to_string(result.skipped_count) + " crossing element" +
       (result.skipped_count == 1 ? std::string() : std::string("s")) + ".";
+  SetLastImportedOperationIssueElements(state, imported_artwork_id,
+                                        std::move(skipped_elements));
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
