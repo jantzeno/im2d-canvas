@@ -1,0 +1,13 @@
+# style_name|preferred_font|width_scale|height_scale|notes
+#
+# preferred_font may be either an absolute path or a font basename that can be
+# found under the standard Linux font roots searched by the importer.
+#
+# width_scale and height_scale are optional multiplicative corrections applied
+# after the DXF entity width/height values are read.
+
+STANDARD|NotoSans-Regular.ttf|1.00|1.00|Default sans substitute for generic DXF styles
+SIMPLEX|NotoSans-Regular.ttf|1.00|1.00|Approximate substitute for SHX simplex-style text
+TXT|NotoSans-Regular.ttf|1.00|1.00|Simple sans fallback for text-only styles
+ROMANS|LiberationSerif-Regular.ttf|1.00|1.00|Approximate serif substitute for SHX romans-style text
+ROMAND|LiberationSerif-Regular.ttf|1.00|1.00|Approximate serif substitute for extended romans-style text

@@ -26,6 +26,32 @@ void ForEachImportedArtworkPoint(ImportedArtwork &artwork,
       function(segment.end);
     }
   }
+
+  for (ImportedDxfText &text : artwork.dxf_text) {
+    for (ImportedTextGlyph &glyph : text.glyphs) {
+      for (ImportedTextContour &contour : glyph.contours) {
+        for (ImportedPathSegment &segment : contour.segments) {
+          function(segment.start);
+          if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+            function(segment.control1);
+            function(segment.control2);
+          }
+          function(segment.end);
+        }
+      }
+    }
+
+    for (ImportedTextContour &contour : text.placeholder_contours) {
+      for (ImportedPathSegment &segment : contour.segments) {
+        function(segment.start);
+        if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+          function(segment.control1);
+          function(segment.control2);
+        }
+        function(segment.end);
+      }
+    }
+  }
 }
 
 struct ImportedArtworkBounds {
@@ -62,6 +88,48 @@ ImportedArtworkBounds ComputeImportedPathBounds(const ImportedPath &path) {
 }
 
 ImportedArtworkBounds
+ComputeImportedTextContourBounds(const ImportedTextContour &contour) {
+  ImportedArtworkBounds bounds;
+  for (const ImportedPathSegment &segment : contour.segments) {
+    IncludePoint(bounds, segment.start);
+    if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+      IncludePoint(bounds, segment.control1);
+      IncludePoint(bounds, segment.control2);
+    }
+    IncludePoint(bounds, segment.end);
+  }
+  return bounds;
+}
+
+ImportedArtworkBounds
+ComputeImportedDxfTextBounds(const ImportedDxfText &text) {
+  ImportedArtworkBounds bounds;
+  for (const ImportedTextGlyph &glyph : text.glyphs) {
+    for (const ImportedTextContour &contour : glyph.contours) {
+      const ImportedArtworkBounds contour_bounds =
+          ComputeImportedTextContourBounds(contour);
+      if (!contour_bounds.valid) {
+        continue;
+      }
+      IncludePoint(bounds, contour_bounds.min);
+      IncludePoint(bounds, contour_bounds.max);
+    }
+  }
+
+  for (const ImportedTextContour &contour : text.placeholder_contours) {
+    const ImportedArtworkBounds contour_bounds =
+        ComputeImportedTextContourBounds(contour);
+    if (!contour_bounds.valid) {
+      continue;
+    }
+    IncludePoint(bounds, contour_bounds.min);
+    IncludePoint(bounds, contour_bounds.max);
+  }
+
+  return bounds;
+}
+
+ImportedArtworkBounds
 ComputeImportedArtworkBounds(const ImportedArtwork &artwork) {
   ImportedArtworkBounds bounds;
   for (const ImportedPath &path : artwork.paths) {
@@ -73,6 +141,16 @@ ComputeImportedArtworkBounds(const ImportedArtwork &artwork) {
       }
       IncludePoint(bounds, segment.end);
     }
+  }
+
+  for (const ImportedDxfText &text : artwork.dxf_text) {
+    const ImportedArtworkBounds text_bounds =
+        ComputeImportedDxfTextBounds(text);
+    if (!text_bounds.valid) {
+      continue;
+    }
+    IncludePoint(bounds, text_bounds.min);
+    IncludePoint(bounds, text_bounds.max);
   }
 
   return bounds;
@@ -106,6 +184,22 @@ ImportedArtworkBounds ComputeImportedGroupBounds(const ImportedArtwork &artwork,
 
     IncludePoint(bounds, path_bounds.min);
     IncludePoint(bounds, path_bounds.max);
+  }
+
+  for (const int text_id : group.dxf_text_ids) {
+    const ImportedDxfText *text = FindImportedDxfText(artwork, text_id);
+    if (text == nullptr) {
+      continue;
+    }
+
+    const ImportedArtworkBounds text_bounds =
+        ComputeImportedDxfTextBounds(*text);
+    if (!text_bounds.valid) {
+      continue;
+    }
+
+    IncludePoint(bounds, text_bounds.min);
+    IncludePoint(bounds, text_bounds.max);
   }
 
   for (const int child_group_id : group.child_group_ids) {
@@ -328,6 +422,21 @@ const ImportedPath *FindImportedPath(const ImportedArtwork &artwork,
   return it == artwork.paths.end() ? nullptr : &(*it);
 }
 
+ImportedDxfText *FindImportedDxfText(ImportedArtwork &artwork, int text_id) {
+  auto it = std::find_if(
+      artwork.dxf_text.begin(), artwork.dxf_text.end(),
+      [text_id](const ImportedDxfText &text) { return text.id == text_id; });
+  return it == artwork.dxf_text.end() ? nullptr : &(*it);
+}
+
+const ImportedDxfText *FindImportedDxfText(const ImportedArtwork &artwork,
+                                           int text_id) {
+  auto it = std::find_if(
+      artwork.dxf_text.begin(), artwork.dxf_text.end(),
+      [text_id](const ImportedDxfText &text) { return text.id == text_id; });
+  return it == artwork.dxf_text.end() ? nullptr : &(*it);
+}
+
 WorkingArea *FindWorkingArea(CanvasState &state, int working_area_id) {
   auto it = std::find_if(state.working_areas.begin(), state.working_areas.end(),
                          [working_area_id](const WorkingArea &area) {
@@ -434,6 +543,55 @@ void RecomputeImportedHierarchyBounds(ImportedArtwork &artwork) {
     } else {
       path.bounds_min = ImVec2(0.0f, 0.0f);
       path.bounds_max = ImVec2(0.0f, 0.0f);
+    }
+  }
+
+  for (ImportedDxfText &text : artwork.dxf_text) {
+    for (ImportedTextGlyph &glyph : text.glyphs) {
+      ImportedArtworkBounds glyph_bounds;
+      for (ImportedTextContour &contour : glyph.contours) {
+        const ImportedArtworkBounds contour_bounds =
+            ComputeImportedTextContourBounds(contour);
+        if (contour_bounds.valid) {
+          contour.bounds_min = contour_bounds.min;
+          contour.bounds_max = contour_bounds.max;
+          IncludePoint(glyph_bounds, contour_bounds.min);
+          IncludePoint(glyph_bounds, contour_bounds.max);
+        } else {
+          contour.bounds_min = ImVec2(0.0f, 0.0f);
+          contour.bounds_max = ImVec2(0.0f, 0.0f);
+        }
+      }
+
+      if (glyph_bounds.valid) {
+        glyph.bounds_min = glyph_bounds.min;
+        glyph.bounds_max = glyph_bounds.max;
+      } else {
+        glyph.bounds_min = ImVec2(0.0f, 0.0f);
+        glyph.bounds_max = ImVec2(0.0f, 0.0f);
+      }
+    }
+
+    for (ImportedTextContour &contour : text.placeholder_contours) {
+      const ImportedArtworkBounds contour_bounds =
+          ComputeImportedTextContourBounds(contour);
+      if (contour_bounds.valid) {
+        contour.bounds_min = contour_bounds.min;
+        contour.bounds_max = contour_bounds.max;
+      } else {
+        contour.bounds_min = ImVec2(0.0f, 0.0f);
+        contour.bounds_max = ImVec2(0.0f, 0.0f);
+      }
+    }
+
+    const ImportedArtworkBounds text_bounds =
+        ComputeImportedDxfTextBounds(text);
+    if (text_bounds.valid) {
+      text.bounds_min = text_bounds.min;
+      text.bounds_max = text_bounds.max;
+    } else {
+      text.bounds_min = ImVec2(0.0f, 0.0f);
+      text.bounds_max = ImVec2(0.0f, 0.0f);
     }
   }
 

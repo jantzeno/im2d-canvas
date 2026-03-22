@@ -160,6 +160,7 @@ enum class ImportedDebugSelectionKind {
   Artwork,
   Group,
   Path,
+  DxfText,
 };
 
 struct ImportedDebugSelection {
@@ -177,6 +178,75 @@ struct ImportedGroup {
   ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
   std::vector<int> child_group_ids;
   std::vector<int> path_ids;
+  std::vector<int> dxf_text_ids;
+};
+
+enum class ImportedTextHorizontalAlignment {
+  Left,
+  Center,
+  Right,
+};
+
+enum class ImportedTextVerticalAlignment {
+  Baseline,
+  Bottom,
+  Middle,
+  Top,
+};
+
+enum class ImportedTextFillRule {
+  NonZero,
+};
+
+enum class ImportedTextContourRole {
+  Outline,
+  Hole,
+  Guide,
+};
+
+struct ImportedTextContour {
+  std::string label;
+  ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
+  std::vector<ImportedPathSegment> segments;
+  bool closed = true;
+  ImportedTextContourRole role = ImportedTextContourRole::Outline;
+};
+
+struct ImportedTextGlyph {
+  std::string label;
+  ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
+  std::vector<ImportedTextContour> contours;
+};
+
+struct ImportedDxfText {
+  int id = 0;
+  int parent_group_id = 0;
+  std::string label;
+  ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
+  std::string source_text;
+  bool multiline = false;
+  ImVec2 anchor_point = ImVec2(0.0f, 0.0f);
+  float text_height = 1.0f;
+  float width_scale = 1.0f;
+  float rotation_degrees = 0.0f;
+  ImportedTextHorizontalAlignment horizontal_alignment =
+      ImportedTextHorizontalAlignment::Left;
+  ImportedTextVerticalAlignment vertical_alignment =
+      ImportedTextVerticalAlignment::Baseline;
+  float line_spacing_factor = 1.0f;
+  ImportedTextFillRule fill_rule = ImportedTextFillRule::NonZero;
+  std::string source_style_name;
+  std::string requested_font_file;
+  std::string resolved_font_path;
+  bool substituted_font = false;
+  bool placeholder_only = false;
+  ImVec4 stroke_color = ImVec4(0.92f, 0.94f, 0.97f, 1.0f);
+  float stroke_width = 1.0f;
+  std::vector<ImportedTextGlyph> glyphs;
+  std::vector<ImportedTextContour> placeholder_contours;
 };
 
 struct ImportedPath {
@@ -204,8 +274,10 @@ struct ImportedArtwork {
   int root_group_id = 0;
   int next_group_id = 1;
   int next_path_id = 1;
+  int next_dxf_text_id = 1;
   std::vector<ImportedGroup> groups;
   std::vector<ImportedPath> paths;
+  std::vector<ImportedDxfText> dxf_text;
   bool visible = true;
   uint32_t flags = kDefaultImportedArtworkFlags;
 };

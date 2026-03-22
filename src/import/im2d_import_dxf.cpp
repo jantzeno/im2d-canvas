@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -246,9 +247,136 @@ std::filesystem::path FindSystemVectorFont(const std::filesystem::path &root) {
   return first_supported_font;
 }
 
+std::vector<std::filesystem::path> FontSearchRoots() {
+  std::vector<std::filesystem::path> font_roots = {"/usr/share/fonts",
+                                                   "/usr/local/share/fonts"};
+  if (const char *home = std::getenv("HOME");
+      home != nullptr && home[0] != '\0') {
+    font_roots.emplace_back(std::filesystem::path(home) / ".local/share/fonts");
+    font_roots.emplace_back(std::filesystem::path(home) / ".fonts");
+  }
+  return font_roots;
+}
+
+std::filesystem::path FindSystemVectorFontByName(std::string_view name) {
+  const std::string wanted = LowercaseCopy(
+      std::filesystem::path(std::string(name)).filename().string());
+  if (wanted.empty()) {
+    return {};
+  }
+
+  for (const std::filesystem::path &root : FontSearchRoots()) {
+    std::error_code error;
+    if (!std::filesystem::exists(root, error) ||
+        !std::filesystem::is_directory(root, error)) {
+      continue;
+    }
+
+    std::filesystem::recursive_directory_iterator iterator(
+        root, std::filesystem::directory_options::skip_permission_denied,
+        error);
+    const std::filesystem::recursive_directory_iterator end;
+    while (!error && iterator != end) {
+      const std::filesystem::directory_entry &entry = *iterator;
+      const std::filesystem::path candidate = entry.path();
+      bool is_regular_file = entry.is_regular_file(error);
+      if (error) {
+        error.clear();
+        iterator.increment(error);
+        continue;
+      }
+      if (!is_regular_file || !HasSupportedFontExtension(candidate)) {
+        iterator.increment(error);
+        continue;
+      }
+
+      if (LowercaseCopy(candidate.filename().string()) == wanted) {
+        return candidate;
+      }
+
+      iterator.increment(error);
+    }
+  }
+
+  return {};
+}
+
 std::string BasenameLower(std::string_view value) {
   return LowercaseCopy(
       std::filesystem::path(std::string(value)).filename().string());
+}
+
+std::string TrimCopy(std::string_view value) {
+  size_t begin = 0;
+  size_t end = value.size();
+  while (begin < end &&
+         std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
+    begin += 1;
+  }
+  while (end > begin &&
+         std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+    end -= 1;
+  }
+  return std::string(value.substr(begin, end - begin));
+}
+
+struct DxfFontPolicyEntry {
+  std::string style_name;
+  std::string preferred_font;
+  double width_scale_correction = 1.0;
+  double height_scale_correction = 1.0;
+  std::string notes;
+};
+
+std::unordered_map<std::string, DxfFontPolicyEntry> LoadDxfFontPolicy() {
+  std::unordered_map<std::string, DxfFontPolicyEntry> policy;
+  const std::filesystem::path policy_path =
+      std::filesystem::current_path() / "config" / "dxf_font_policy.txt";
+  std::ifstream input(policy_path);
+  if (!input.is_open()) {
+    return policy;
+  }
+
+  std::string line;
+  while (std::getline(input, line)) {
+    const std::string trimmed = TrimCopy(line);
+    if (trimmed.empty() || trimmed[0] == '#') {
+      continue;
+    }
+
+    std::vector<std::string> fields;
+    size_t start = 0;
+    while (start <= trimmed.size()) {
+      const size_t delimiter = trimmed.find('|', start);
+      if (delimiter == std::string::npos) {
+        fields.push_back(TrimCopy(trimmed.substr(start)));
+        break;
+      }
+      fields.push_back(TrimCopy(trimmed.substr(start, delimiter - start)));
+      start = delimiter + 1;
+    }
+    if (fields.size() < 2 || fields[0].empty() || fields[1].empty()) {
+      continue;
+    }
+
+    DxfFontPolicyEntry entry;
+    entry.style_name = fields[0];
+    entry.preferred_font = fields[1];
+    if (fields.size() >= 3 && !fields[2].empty()) {
+      entry.width_scale_correction =
+          std::max(std::atof(fields[2].c_str()), 0.1);
+    }
+    if (fields.size() >= 4 && !fields[3].empty()) {
+      entry.height_scale_correction =
+          std::max(std::atof(fields[3].c_str()), 0.1);
+    }
+    if (fields.size() >= 5) {
+      entry.notes = fields[4];
+    }
+    policy[LowercaseCopy(entry.style_name)] = std::move(entry);
+  }
+
+  return policy;
 }
 
 std::string EscapeXmlAttribute(std::string_view value) {
@@ -307,15 +435,7 @@ std::filesystem::path ResolveVectorFontPath() {
     }
   }
 
-  std::vector<std::filesystem::path> font_roots = {"/usr/share/fonts",
-                                                   "/usr/local/share/fonts"};
-  if (const char *home = std::getenv("HOME");
-      home != nullptr && home[0] != '\0') {
-    font_roots.emplace_back(std::filesystem::path(home) / ".local/share/fonts");
-    font_roots.emplace_back(std::filesystem::path(home) / ".fonts");
-  }
-
-  for (const std::filesystem::path &root : font_roots) {
+  for (const std::filesystem::path &root : FontSearchRoots()) {
     const std::filesystem::path candidate = FindSystemVectorFont(root);
     if (!candidate.empty()) {
       return candidate;
@@ -462,25 +582,105 @@ VerticalTextAlignment VerticalAlignmentForText(const DRW_Text &data,
   }
 }
 
+ImportedTextHorizontalAlignment
+ToImportedTextHorizontalAlignment(HorizontalTextAlignment alignment) {
+  switch (alignment) {
+  case HorizontalTextAlignment::Center:
+    return ImportedTextHorizontalAlignment::Center;
+  case HorizontalTextAlignment::Right:
+    return ImportedTextHorizontalAlignment::Right;
+  case HorizontalTextAlignment::Left:
+  default:
+    return ImportedTextHorizontalAlignment::Left;
+  }
+}
+
+ImportedTextVerticalAlignment
+ToImportedTextVerticalAlignment(VerticalTextAlignment alignment) {
+  switch (alignment) {
+  case VerticalTextAlignment::Bottom:
+    return ImportedTextVerticalAlignment::Bottom;
+  case VerticalTextAlignment::Middle:
+    return ImportedTextVerticalAlignment::Middle;
+  case VerticalTextAlignment::Top:
+    return ImportedTextVerticalAlignment::Top;
+  case VerticalTextAlignment::Baseline:
+  default:
+    return ImportedTextVerticalAlignment::Baseline;
+  }
+}
+
+ImVec4 ParseHexColor(std::string_view color) {
+  if (color.size() == 7 && color.front() == '#') {
+    const auto parse_channel = [&](size_t offset) {
+      return static_cast<float>(std::strtoul(
+                 std::string(color.substr(offset, 2)).c_str(), nullptr, 16)) /
+             255.0f;
+    };
+    return ImVec4(parse_channel(1), parse_channel(3), parse_channel(5), 1.0f);
+  }
+  return ImVec4(0.12f, 0.12f, 0.12f, 1.0f);
+}
+
+ImportedPathSegment MakeLineSegment(const ImVec2 &start, const ImVec2 &end) {
+  ImportedPathSegment segment;
+  segment.kind = ImportedPathSegmentKind::Line;
+  segment.start = start;
+  segment.end = end;
+  return segment;
+}
+
+ImportedTextContour BuildClosedContour(std::vector<ImVec2> points,
+                                       ImportedTextContourRole role,
+                                       std::string label) {
+  ImportedTextContour contour;
+  contour.label = std::move(label);
+  contour.role = role;
+  contour.closed = true;
+  if (points.size() < 2) {
+    return contour;
+  }
+
+  for (size_t index = 0; index < points.size(); ++index) {
+    contour.segments.push_back(
+        MakeLineSegment(points[index], points[(index + 1) % points.size()]));
+  }
+  return contour;
+}
+
+template <typename Function>
+void ForEachImportedDxfTextPoint(ImportedDxfText &text, Function &&function) {
+  for (ImportedTextGlyph &glyph : text.glyphs) {
+    for (ImportedTextContour &contour : glyph.contours) {
+      for (ImportedPathSegment &segment : contour.segments) {
+        function(segment.start);
+        if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+          function(segment.control1);
+          function(segment.control2);
+        }
+        function(segment.end);
+      }
+    }
+  }
+
+  for (ImportedTextContour &contour : text.placeholder_contours) {
+    for (ImportedPathSegment &segment : contour.segments) {
+      function(segment.start);
+      if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+        function(segment.control1);
+        function(segment.control2);
+      }
+      function(segment.end);
+    }
+  }
+}
+
 class VectorGlyphFont {
 public:
   VectorGlyphFont() {
     if (FT_Init_FreeType(&library_) != 0) {
       library_ = nullptr;
-      return;
     }
-
-    const std::filesystem::path font_path = ResolveVectorFontPath();
-    if (font_path.empty()) {
-      return;
-    }
-
-    if (FT_New_Face(library_, font_path.string().c_str(), 0, &face_) != 0) {
-      face_ = nullptr;
-      return;
-    }
-
-    font_path_ = font_path.string();
   }
 
   ~VectorGlyphFont() {
@@ -496,13 +696,47 @@ public:
 
   const std::string &font_path() const { return font_path_; }
 
-  bool AppendTextSvg(const std::string &text, double anchor_x, double anchor_y,
-                     double height, double widthscale, double angle_degrees,
-                     HorizontalTextAlignment horizontal_alignment,
-                     VerticalTextAlignment vertical_alignment,
-                     double line_spacing_factor, std::string_view stroke_color,
-                     unsigned int marker_color, std::ostringstream &body,
-                     const std::function<void(double, double)> &update_bounds);
+  bool LoadFont(const std::filesystem::path &font_path) {
+    if (library_ == nullptr || font_path.empty()) {
+      return false;
+    }
+
+    const std::string requested_path = font_path.string();
+    if (face_ != nullptr && font_path_ == requested_path) {
+      return true;
+    }
+
+    if (face_ != nullptr) {
+      FT_Done_Face(face_);
+      face_ = nullptr;
+    }
+
+    if (FT_New_Face(library_, requested_path.c_str(), 0, &face_) != 0) {
+      face_ = nullptr;
+      font_path_.clear();
+      return false;
+    }
+
+    font_path_ = requested_path;
+    return true;
+  }
+
+  bool
+  BuildTextGeometry(const std::string &text, double anchor_x, double anchor_y,
+                    double height, double widthscale, double angle_degrees,
+                    HorizontalTextAlignment horizontal_alignment,
+                    VerticalTextAlignment vertical_alignment,
+                    double line_spacing_factor, ImportedDxfText *imported_text,
+                    const std::function<void(double, double)> &update_bounds);
+
+  [[maybe_unused]] bool
+  AppendTextSvg(const std::string &text, double anchor_x, double anchor_y,
+                double height, double widthscale, double angle_degrees,
+                HorizontalTextAlignment horizontal_alignment,
+                VerticalTextAlignment vertical_alignment,
+                double line_spacing_factor, std::string_view stroke_color,
+                unsigned int marker_color, std::ostringstream &body,
+                const std::function<void(double, double)> &update_bounds);
 
 private:
   struct OutlineSvgBuilder {
@@ -554,14 +788,77 @@ private:
     void CloseContour();
   };
 
+  struct OutlineGeometryBuilder {
+    struct Contour {
+      std::vector<ImportedPathSegment> segments;
+      std::vector<std::pair<double, double>> samples;
+
+      double SignedArea() const {
+        if (samples.size() < 3) {
+          return 0.0;
+        }
+
+        double twice_area = 0.0;
+        for (size_t index = 0; index < samples.size(); ++index) {
+          const auto &[x1, y1] = samples[index];
+          const auto &[x2, y2] = samples[(index + 1) % samples.size()];
+          twice_area += x1 * y2 - x2 * y1;
+        }
+        return twice_area * 0.5;
+      }
+    };
+
+    double anchor_x = 0.0;
+    double anchor_y = 0.0;
+    double scale = 1.0;
+    double widthscale = 1.0;
+    double pen_x_units = 0.0;
+    double line_offset_x = 0.0;
+    double baseline_y = 0.0;
+    double cosine = 1.0;
+    double sine = 0.0;
+    std::function<void(double, double)> update_bounds;
+    double current_x = 0.0;
+    double current_y = 0.0;
+    bool contour_open = false;
+    bool has_geometry = false;
+    std::vector<Contour> contours;
+    size_t current_contour_index = 0;
+
+    std::pair<double, double> TransformPoint(double x_units,
+                                             double y_units) const;
+    Contour *CurrentContour() {
+      if (!contour_open || current_contour_index >= contours.size()) {
+        return nullptr;
+      }
+      return &contours[current_contour_index];
+    }
+
+    void CloseContour() { contour_open = false; }
+  };
+
   static int MoveTo(const FT_Vector *to, void *user);
   static int LineTo(const FT_Vector *to, void *user);
   static int ConicTo(const FT_Vector *control, const FT_Vector *to, void *user);
   static int CubicTo(const FT_Vector *control1, const FT_Vector *control2,
                      const FT_Vector *to, void *user);
 
+  static int GeometryMoveTo(const FT_Vector *to, void *user);
+  static int GeometryLineTo(const FT_Vector *to, void *user);
+  static int GeometryConicTo(const FT_Vector *control, const FT_Vector *to,
+                             void *user);
+  static int GeometryCubicTo(const FT_Vector *control1,
+                             const FT_Vector *control2, const FT_Vector *to,
+                             void *user);
+
   FT_UInt ResolveGlyphIndex(uint32_t codepoint) const;
   double MeasureLineUnits(const std::vector<uint32_t> &line);
+  bool
+  BuildLineGeometry(const std::vector<uint32_t> &line, double anchor_x,
+                    double anchor_y, double scale, double widthscale,
+                    double line_offset_x, double baseline_y, double cosine,
+                    double sine, ImportedDxfText *imported_text,
+                    const std::function<void(double, double)> &update_bounds);
   bool AppendLineSvg(const std::vector<uint32_t> &line, double anchor_x,
                      double anchor_y, double scale, double widthscale,
                      double line_offset_x, double baseline_y, double cosine,
@@ -577,6 +874,16 @@ private:
 std::pair<double, double>
 VectorGlyphFont::OutlineSvgBuilder::TransformPoint(double x_units,
                                                    double y_units) const {
+  const double local_x =
+      line_offset_x + (pen_x_units + x_units) * scale * widthscale;
+  const double local_y = baseline_y + y_units * scale;
+  return {anchor_x + local_x * cosine - local_y * sine,
+          anchor_y + local_x * sine + local_y * cosine};
+}
+
+std::pair<double, double>
+VectorGlyphFont::OutlineGeometryBuilder::TransformPoint(double x_units,
+                                                        double y_units) const {
   const double local_x =
       line_offset_x + (pen_x_units + x_units) * scale * widthscale;
   const double local_y = baseline_y + y_units * scale;
@@ -712,6 +1019,146 @@ int VectorGlyphFont::CubicTo(const FT_Vector *control1,
   return 0;
 }
 
+int VectorGlyphFont::GeometryMoveTo(const FT_Vector *to, void *user) {
+  auto *builder = static_cast<OutlineGeometryBuilder *>(user);
+  builder->CloseContour();
+  builder->contours.emplace_back();
+  builder->current_contour_index = builder->contours.size() - 1;
+  builder->contours.back().samples.emplace_back(static_cast<double>(to->x),
+                                                static_cast<double>(to->y));
+  const auto [x, y] = builder->TransformPoint(static_cast<double>(to->x),
+                                              static_cast<double>(to->y));
+  builder->update_bounds(x, y);
+  builder->current_x = static_cast<double>(to->x);
+  builder->current_y = static_cast<double>(to->y);
+  builder->contour_open = true;
+  builder->has_geometry = true;
+  return 0;
+}
+
+int VectorGlyphFont::GeometryLineTo(const FT_Vector *to, void *user) {
+  auto *builder = static_cast<OutlineGeometryBuilder *>(user);
+  const auto [start_x, start_y] =
+      builder->TransformPoint(builder->current_x, builder->current_y);
+  const auto [end_x, end_y] = builder->TransformPoint(
+      static_cast<double>(to->x), static_cast<double>(to->y));
+  if (auto *contour = builder->CurrentContour(); contour != nullptr) {
+    ImportedPathSegment segment;
+    segment.kind = ImportedPathSegmentKind::Line;
+    segment.start =
+        ImVec2(static_cast<float>(start_x), static_cast<float>(start_y));
+    segment.end = ImVec2(static_cast<float>(end_x), static_cast<float>(end_y));
+    contour->segments.push_back(segment);
+    contour->samples.emplace_back(static_cast<double>(to->x),
+                                  static_cast<double>(to->y));
+  }
+  builder->update_bounds(end_x, end_y);
+  builder->current_x = static_cast<double>(to->x);
+  builder->current_y = static_cast<double>(to->y);
+  builder->has_geometry = true;
+  return 0;
+}
+
+int VectorGlyphFont::GeometryConicTo(const FT_Vector *control,
+                                     const FT_Vector *to, void *user) {
+  auto *builder = static_cast<OutlineGeometryBuilder *>(user);
+  const double control_x = static_cast<double>(control->x);
+  const double control_y = static_cast<double>(control->y);
+  const double end_x = static_cast<double>(to->x);
+  const double end_y = static_cast<double>(to->y);
+  const double cubic1_x =
+      builder->current_x + (2.0 / 3.0) * (control_x - builder->current_x);
+  const double cubic1_y =
+      builder->current_y + (2.0 / 3.0) * (control_y - builder->current_y);
+  const double cubic2_x = end_x + (2.0 / 3.0) * (control_x - end_x);
+  const double cubic2_y = end_y + (2.0 / 3.0) * (control_y - end_y);
+  const auto [start_tx, start_ty] =
+      builder->TransformPoint(builder->current_x, builder->current_y);
+  const auto [x1, y1] = builder->TransformPoint(cubic1_x, cubic1_y);
+  const auto [x2, y2] = builder->TransformPoint(cubic2_x, cubic2_y);
+  const auto [x3, y3] = builder->TransformPoint(end_x, end_y);
+  if (auto *contour = builder->CurrentContour(); contour != nullptr) {
+    ImportedPathSegment segment;
+    segment.kind = ImportedPathSegmentKind::CubicBezier;
+    segment.start =
+        ImVec2(static_cast<float>(start_tx), static_cast<float>(start_ty));
+    segment.control1 = ImVec2(static_cast<float>(x1), static_cast<float>(y1));
+    segment.control2 = ImVec2(static_cast<float>(x2), static_cast<float>(y2));
+    segment.end = ImVec2(static_cast<float>(x3), static_cast<float>(y3));
+    contour->segments.push_back(segment);
+    constexpr int kCurveSamples = 8;
+    for (int sample_index = 1; sample_index <= kCurveSamples; ++sample_index) {
+      const double t = static_cast<double>(sample_index) /
+                       static_cast<double>(kCurveSamples);
+      const double mt = 1.0 - t;
+      const double sample_x = mt * mt * builder->current_x +
+                              2.0 * mt * t * control_x + t * t * end_x;
+      const double sample_y = mt * mt * builder->current_y +
+                              2.0 * mt * t * control_y + t * t * end_y;
+      contour->samples.emplace_back(sample_x, sample_y);
+    }
+  }
+  builder->update_bounds(x1, y1);
+  builder->update_bounds(x2, y2);
+  builder->update_bounds(x3, y3);
+  builder->current_x = end_x;
+  builder->current_y = end_y;
+  builder->has_geometry = true;
+  return 0;
+}
+
+int VectorGlyphFont::GeometryCubicTo(const FT_Vector *control1,
+                                     const FT_Vector *control2,
+                                     const FT_Vector *to, void *user) {
+  auto *builder = static_cast<OutlineGeometryBuilder *>(user);
+  const auto [start_tx, start_ty] =
+      builder->TransformPoint(builder->current_x, builder->current_y);
+  const auto [x1, y1] = builder->TransformPoint(
+      static_cast<double>(control1->x), static_cast<double>(control1->y));
+  const auto [x2, y2] = builder->TransformPoint(
+      static_cast<double>(control2->x), static_cast<double>(control2->y));
+  const auto [x3, y3] = builder->TransformPoint(static_cast<double>(to->x),
+                                                static_cast<double>(to->y));
+  if (auto *contour = builder->CurrentContour(); contour != nullptr) {
+    ImportedPathSegment segment;
+    segment.kind = ImportedPathSegmentKind::CubicBezier;
+    segment.start =
+        ImVec2(static_cast<float>(start_tx), static_cast<float>(start_ty));
+    segment.control1 = ImVec2(static_cast<float>(x1), static_cast<float>(y1));
+    segment.control2 = ImVec2(static_cast<float>(x2), static_cast<float>(y2));
+    segment.end = ImVec2(static_cast<float>(x3), static_cast<float>(y3));
+    contour->segments.push_back(segment);
+    constexpr int kCurveSamples = 8;
+    const double start_x = builder->current_x;
+    const double start_y = builder->current_y;
+    const double control1_x = static_cast<double>(control1->x);
+    const double control1_y = static_cast<double>(control1->y);
+    const double control2_x = static_cast<double>(control2->x);
+    const double control2_y = static_cast<double>(control2->y);
+    const double end_x = static_cast<double>(to->x);
+    const double end_y = static_cast<double>(to->y);
+    for (int sample_index = 1; sample_index <= kCurveSamples; ++sample_index) {
+      const double t = static_cast<double>(sample_index) /
+                       static_cast<double>(kCurveSamples);
+      const double mt = 1.0 - t;
+      const double sample_x = mt * mt * mt * start_x +
+                              3.0 * mt * mt * t * control1_x +
+                              3.0 * mt * t * t * control2_x + t * t * t * end_x;
+      const double sample_y = mt * mt * mt * start_y +
+                              3.0 * mt * mt * t * control1_y +
+                              3.0 * mt * t * t * control2_y + t * t * t * end_y;
+      contour->samples.emplace_back(sample_x, sample_y);
+    }
+  }
+  builder->update_bounds(x1, y1);
+  builder->update_bounds(x2, y2);
+  builder->update_bounds(x3, y3);
+  builder->current_x = static_cast<double>(to->x);
+  builder->current_y = static_cast<double>(to->y);
+  builder->has_geometry = true;
+  return 0;
+}
+
 FT_UInt VectorGlyphFont::ResolveGlyphIndex(uint32_t codepoint) const {
   FT_UInt glyph_index = FT_Get_Char_Index(face_, codepoint);
   if (glyph_index == 0 && codepoint != static_cast<uint32_t>('?')) {
@@ -744,6 +1191,188 @@ double VectorGlyphFont::MeasureLineUnits(const std::vector<uint32_t> &line) {
     previous_glyph = glyph_index;
   }
   return advance;
+}
+
+bool VectorGlyphFont::BuildLineGeometry(
+    const std::vector<uint32_t> &line, double anchor_x, double anchor_y,
+    double scale, double widthscale, double line_offset_x, double baseline_y,
+    double cosine, double sine, ImportedDxfText *imported_text,
+    const std::function<void(double, double)> &update_bounds) {
+  FT_UInt previous_glyph = 0;
+  double pen_x_units = 0.0;
+  bool emitted_any = false;
+  int glyph_index_in_line = 0;
+  for (uint32_t codepoint : line) {
+    const FT_UInt glyph_index = ResolveGlyphIndex(codepoint);
+    if (glyph_index == 0) {
+      pen_x_units += std::max<double>(face_->units_per_EM * 0.5, 1.0);
+      previous_glyph = 0;
+      glyph_index_in_line += 1;
+      continue;
+    }
+    if (FT_HAS_KERNING(face_) && previous_glyph != 0) {
+      FT_Vector kerning = {};
+      FT_Get_Kerning(face_, previous_glyph, glyph_index, FT_KERNING_UNSCALED,
+                     &kerning);
+      pen_x_units += static_cast<double>(kerning.x);
+    }
+    if (FT_Load_Glyph(face_, glyph_index,
+                      FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING |
+                          FT_LOAD_NO_BITMAP) != 0) {
+      previous_glyph = glyph_index;
+      glyph_index_in_line += 1;
+      continue;
+    }
+
+    if (face_->glyph->format == FT_GLYPH_FORMAT_OUTLINE &&
+        face_->glyph->outline.n_contours > 0) {
+      OutlineGeometryBuilder builder;
+      builder.anchor_x = anchor_x;
+      builder.anchor_y = anchor_y;
+      builder.scale = scale;
+      builder.widthscale = widthscale;
+      builder.pen_x_units = pen_x_units;
+      builder.line_offset_x = line_offset_x;
+      builder.baseline_y = baseline_y;
+      builder.cosine = cosine;
+      builder.sine = sine;
+      builder.update_bounds = update_bounds;
+      FT_Outline_Funcs callbacks = {&GeometryMoveTo,
+                                    &GeometryLineTo,
+                                    &GeometryConicTo,
+                                    &GeometryCubicTo,
+                                    0,
+                                    0};
+      if (FT_Outline_Decompose(&face_->glyph->outline, &callbacks, &builder) ==
+          0) {
+        builder.CloseContour();
+        if (builder.has_geometry) {
+          int dominant_sign = 1;
+          double dominant_area = 0.0;
+          for (const OutlineGeometryBuilder::Contour &contour :
+               builder.contours) {
+            const double area = contour.SignedArea();
+            if (std::abs(area) > dominant_area) {
+              dominant_area = std::abs(area);
+              dominant_sign = area < 0.0 ? -1 : 1;
+            }
+          }
+
+          ImportedTextGlyph glyph;
+          glyph.label = "Glyph " + std::to_string(glyph_index_in_line + 1);
+          int contour_index = 0;
+          for (const OutlineGeometryBuilder::Contour &contour :
+               builder.contours) {
+            if (contour.samples.size() < 3 || contour.segments.empty()) {
+              contour_index += 1;
+              continue;
+            }
+
+            const double area = contour.SignedArea();
+            const int contour_sign = area < 0.0 ? -1 : 1;
+            ImportedTextContour imported_contour;
+            imported_contour.label =
+                "Contour " + std::to_string(contour_index + 1);
+            imported_contour.closed = true;
+            imported_contour.role =
+                dominant_area > 0.0 && contour_sign != dominant_sign
+                    ? ImportedTextContourRole::Hole
+                    : ImportedTextContourRole::Outline;
+            imported_contour.segments = contour.segments;
+            glyph.contours.push_back(std::move(imported_contour));
+            contour_index += 1;
+          }
+
+          if (!glyph.contours.empty()) {
+            imported_text->glyphs.push_back(std::move(glyph));
+            emitted_any = true;
+          }
+        }
+      }
+    }
+
+    pen_x_units += static_cast<double>(face_->glyph->advance.x);
+    previous_glyph = glyph_index;
+    glyph_index_in_line += 1;
+  }
+  return emitted_any;
+}
+
+bool VectorGlyphFont::BuildTextGeometry(
+    const std::string &text, double anchor_x, double anchor_y, double height,
+    double widthscale, double angle_degrees,
+    HorizontalTextAlignment horizontal_alignment,
+    VerticalTextAlignment vertical_alignment, double line_spacing_factor,
+    ImportedDxfText *imported_text,
+    const std::function<void(double, double)> &update_bounds) {
+  if (!available() || text.empty() || imported_text == nullptr) {
+    return false;
+  }
+  const std::vector<std::string> line_text = SplitTextLines(text);
+  if (line_text.empty()) {
+    return false;
+  }
+  std::vector<std::vector<uint32_t>> lines;
+  lines.reserve(line_text.size());
+  for (const std::string &line : line_text) {
+    lines.push_back(DecodeUtf8(line));
+  }
+  const double units_per_em = std::max<double>(face_->units_per_EM, 1.0);
+  const double scale = height / units_per_em;
+  const double effective_widthscale = std::max(widthscale, 0.1);
+  const double ascender = face_->ascender * scale;
+  const double descender = face_->descender * scale;
+  const double raw_line_height_units =
+      face_->height > 0
+          ? static_cast<double>(face_->height)
+          : static_cast<double>(face_->ascender - face_->descender);
+  const double line_height = std::max(raw_line_height_units * scale *
+                                          std::max(line_spacing_factor, 1.0),
+                                      height);
+  const double block_top = ascender;
+  const double block_bottom =
+      descender - line_height * static_cast<double>(lines.size() - 1);
+  double baseline_shift = 0.0;
+  switch (vertical_alignment) {
+  case VerticalTextAlignment::Baseline:
+    baseline_shift = 0.0;
+    break;
+  case VerticalTextAlignment::Bottom:
+    baseline_shift = -block_bottom;
+    break;
+  case VerticalTextAlignment::Middle:
+    baseline_shift = -(block_top + block_bottom) * 0.5;
+    break;
+  case VerticalTextAlignment::Top:
+    baseline_shift = -block_top;
+    break;
+  }
+  const double radians = angle_degrees * kPi / 180.0;
+  const double cosine = std::cos(radians);
+  const double sine = std::sin(radians);
+  bool emitted_any = false;
+  for (size_t line_index = 0; line_index < lines.size(); ++line_index) {
+    const double line_width =
+        MeasureLineUnits(lines[line_index]) * scale * effective_widthscale;
+    double line_offset_x = 0.0;
+    switch (horizontal_alignment) {
+    case HorizontalTextAlignment::Left:
+      break;
+    case HorizontalTextAlignment::Center:
+      line_offset_x = -line_width * 0.5;
+      break;
+    case HorizontalTextAlignment::Right:
+      line_offset_x = -line_width;
+      break;
+    }
+
+    emitted_any |= BuildLineGeometry(
+        lines[line_index], anchor_x, anchor_y, scale, effective_widthscale,
+        line_offset_x,
+        baseline_shift - line_height * static_cast<double>(line_index), cosine,
+        sine, imported_text, update_bounds);
+  }
+  return emitted_any;
 }
 
 bool VectorGlyphFont::AppendLineSvg(
@@ -909,6 +1538,7 @@ struct SvgFragment {
   double min_y = std::numeric_limits<double>::max();
   double max_x = std::numeric_limits<double>::lowest();
   double max_y = std::numeric_limits<double>::lowest();
+  std::vector<ImportedDxfText> dxf_text;
   struct PendingInsert {
     std::string token;
     DRW_Insert insert;
@@ -1518,12 +2148,14 @@ public:
                       std::string(vectorized_mtext_count_ == 1 ? "y" : "ies") +
                       " as vector glyph outlines.");
     }
-    if (vector_glyph_font_.available() &&
-        (vectorized_text_count_ > 0 || vectorized_mtext_count_ > 0)) {
-      notes.push_back("DXF vector text used font: " +
-                      vector_glyph_font_.font_path());
+    if (vectorized_text_count_ > 0 || vectorized_mtext_count_ > 0) {
+      notes.push_back("DXF imported text is using the dedicated contour "
+                      "renderer for compound glyph fills.");
     }
-    if (!vector_glyph_font_.available() &&
+    for (const std::string &font_path : used_vector_font_paths_) {
+      notes.push_back("DXF vector text used font: " + font_path);
+    }
+    if (used_vector_font_paths_.empty() &&
         (approximated_text_count_ > 0 || approximated_mtext_count_ > 0)) {
       notes.push_back(
           "No TrueType font was found for DXF text vectorization; set "
@@ -1561,7 +2193,7 @@ public:
 
   std::string BuildSvg() {
     FinalizeGeometry();
-    if (!model_.has_geometry) {
+    if (!model_.has_geometry || model_.body.str().empty()) {
       return {};
     }
 
@@ -1581,10 +2213,27 @@ public:
     return svg.str();
   }
 
+  std::vector<ImportedDxfText> TakeDxfText() {
+    FinalizeGeometry();
+    return std::move(model_.dxf_text);
+  }
+
 private:
   struct TextStyleInfo {
     std::string font;
     std::string big_font;
+  };
+
+  struct ResolvedFontChoice {
+    std::filesystem::path resolved_path;
+    std::string requested_font;
+    std::string style_name;
+    std::string policy_notes;
+    double width_scale_correction = 1.0;
+    double height_scale_correction = 1.0;
+    bool used_requested_font = false;
+    bool used_policy = false;
+    bool used_env_override = false;
   };
 
   std::ostringstream &CurrentBody() { return CurrentFragment().body; }
@@ -1614,6 +2263,53 @@ private:
     text.replace(position, needle.size(), replacement);
   }
 
+  static void UpdateFragmentBoundsFromDxfText(SvgFragment &fragment,
+                                              const ImportedDxfText &text) {
+    ImportedDxfText copy = text;
+    ForEachImportedDxfTextPoint(copy, [&fragment](const ImVec2 &point) {
+      UpdateFragmentBounds(fragment, point.x, point.y);
+    });
+  }
+
+  DRW_Coord TransformInsertPoint(const SvgBlock &block,
+                                 const DRW_Insert &insert, int col, int row,
+                                 double x, double y) {
+    const double local_x = (x - block.base_point.x) * insert.xscale;
+    const double local_y = (y - block.base_point.y) * insert.yscale;
+    const double cosine = std::cos(insert.angle);
+    const double sine = std::sin(insert.angle);
+    const double rotated_x = local_x * cosine - local_y * sine;
+    const double rotated_y = local_x * sine + local_y * cosine;
+    return DRW_Coord(insert.basePoint.x + rotated_x + col * insert.colspace,
+                     insert.basePoint.y + rotated_y + row * insert.rowspace,
+                     0.0);
+  }
+
+  ImportedDxfText TransformImportedDxfText(const SvgBlock &block,
+                                           const DRW_Insert &insert, int col,
+                                           int row,
+                                           ImportedDxfText imported_text) {
+    ForEachImportedDxfTextPoint(imported_text, [&](ImVec2 &point) {
+      const DRW_Coord transformed =
+          TransformInsertPoint(block, insert, col, row, point.x, point.y);
+      point = ImVec2(static_cast<float>(transformed.x),
+                     static_cast<float>(transformed.y));
+    });
+
+    const DRW_Coord anchor = TransformInsertPoint(block, insert, col, row,
+                                                  imported_text.anchor_point.x,
+                                                  imported_text.anchor_point.y);
+    imported_text.anchor_point =
+        ImVec2(static_cast<float>(anchor.x), static_cast<float>(anchor.y));
+    imported_text.rotation_degrees +=
+        static_cast<float>(insert.angle * 180.0 / kPi);
+    imported_text.width_scale *=
+        static_cast<float>(std::max(std::abs(insert.xscale), 0.1));
+    imported_text.text_height *=
+        static_cast<float>(std::max(std::abs(insert.yscale), 0.1));
+    return imported_text;
+  }
+
   void AppendDeferredInsert(const DRW_Insert &data) {
     SvgFragment &fragment = CurrentFragment();
     const std::string token =
@@ -1622,7 +2318,86 @@ private:
     fragment.pending_inserts.push_back(SvgFragment::PendingInsert{token, data});
   }
 
-  void RecordFontResolution(const DRW_Text &data, bool vectorized) {
+  void RecordUsedVectorFont(const std::filesystem::path &font_path) {
+    const std::string path_text = font_path.string();
+    if (path_text.empty()) {
+      return;
+    }
+    if (used_vector_font_path_set_.insert(path_text).second) {
+      used_vector_font_paths_.push_back(path_text);
+    }
+  }
+
+  ResolvedFontChoice ResolveFontChoice(const DRW_Text &data) const {
+    ResolvedFontChoice choice;
+    choice.style_name = data.style;
+
+    const auto style_it = text_styles_.find(data.style);
+    if (style_it != text_styles_.end()) {
+      choice.requested_font = style_it->second.font;
+    }
+
+    if (const char *override_path = std::getenv("IM2D_DXF_TEXT_FONT");
+        override_path != nullptr && override_path[0] != '\0') {
+      const std::filesystem::path candidate(override_path);
+      std::error_code error;
+      if (std::filesystem::exists(candidate, error) &&
+          HasSupportedFontExtension(candidate)) {
+        choice.resolved_path = candidate;
+        choice.used_env_override = true;
+        return choice;
+      }
+    }
+
+    if (!choice.requested_font.empty()) {
+      const std::filesystem::path requested_path(choice.requested_font);
+      std::error_code error;
+      if (HasSupportedFontExtension(requested_path) &&
+          std::filesystem::exists(requested_path, error)) {
+        choice.resolved_path = requested_path;
+        choice.used_requested_font = true;
+        return choice;
+      }
+
+      const std::filesystem::path basename_match =
+          FindSystemVectorFontByName(choice.requested_font);
+      if (!basename_match.empty()) {
+        choice.resolved_path = basename_match;
+        choice.used_requested_font = true;
+        return choice;
+      }
+    }
+
+    const auto policy_it = font_policy_.find(LowercaseCopy(data.style));
+    if (policy_it != font_policy_.end()) {
+      const DxfFontPolicyEntry &entry = policy_it->second;
+      const std::filesystem::path direct_candidate(entry.preferred_font);
+      std::filesystem::path resolved_policy_font;
+      std::error_code error;
+      if (HasSupportedFontExtension(direct_candidate) &&
+          std::filesystem::exists(direct_candidate, error)) {
+        resolved_policy_font = direct_candidate;
+      } else {
+        resolved_policy_font = FindSystemVectorFontByName(entry.preferred_font);
+      }
+
+      if (!resolved_policy_font.empty()) {
+        choice.resolved_path = resolved_policy_font;
+        choice.used_policy = true;
+        choice.policy_notes = entry.notes;
+        choice.width_scale_correction = entry.width_scale_correction;
+        choice.height_scale_correction = entry.height_scale_correction;
+        return choice;
+      }
+    }
+
+    choice.resolved_path = ResolveVectorFontPath();
+    return choice;
+  }
+
+  void RecordFontResolution(const DRW_Text &data, bool vectorized,
+                            const ResolvedFontChoice &choice,
+                            ImportedDxfText *imported_text) {
     const auto style_it = text_styles_.find(data.style);
     if (style_it == text_styles_.end()) {
       return;
@@ -1633,18 +2408,50 @@ private:
       return;
     }
 
+    if (imported_text != nullptr) {
+      imported_text->source_style_name = data.style;
+      imported_text->requested_font_file = style_info.font;
+      imported_text->resolved_font_path = choice.resolved_path.string();
+      if (vectorized && !choice.resolved_path.empty()) {
+        imported_text->substituted_font =
+            BasenameLower(style_info.font) !=
+                BasenameLower(choice.resolved_path.string()) ||
+            choice.used_policy || choice.used_env_override;
+      }
+    }
+
     std::ostringstream note;
     note << "DXF text style " << data.style << " requested " << style_info.font;
     if (!style_info.big_font.empty()) {
       note << " (bigfont " << style_info.big_font << ")";
     }
 
-    if (vectorized && vector_glyph_font_.available()) {
-      if (BasenameLower(style_info.font) ==
-          BasenameLower(vector_glyph_font_.font_path())) {
+    if (vectorized && !choice.resolved_path.empty()) {
+      if (!choice.used_policy && !choice.used_env_override &&
+          BasenameLower(style_info.font) ==
+              BasenameLower(choice.resolved_path.string()) &&
+          std::abs(choice.width_scale_correction - 1.0) < 1e-6 &&
+          std::abs(choice.height_scale_correction - 1.0) < 1e-6) {
         return;
       }
-      note << "; used " << vector_glyph_font_.font_path() << " instead.";
+      note << "; used " << choice.resolved_path.string();
+      if (choice.used_env_override) {
+        note << " via IM2D_DXF_TEXT_FONT override";
+      } else if (choice.used_policy) {
+        note << " via checked-in policy";
+      } else if (!choice.used_requested_font) {
+        note << " as a fallback substitute";
+      }
+      if (std::abs(choice.width_scale_correction - 1.0) >= 1e-6 ||
+          std::abs(choice.height_scale_correction - 1.0) >= 1e-6) {
+        note << " with scale correction width="
+             << FormatNumber(choice.width_scale_correction)
+             << ", height=" << FormatNumber(choice.height_scale_correction);
+      }
+      if (!choice.policy_notes.empty()) {
+        note << " (" << choice.policy_notes << ")";
+      }
+      note << '.';
     } else {
       note << "; no outline substitute font was available, so placeholder "
               "geometry was used.";
@@ -1894,24 +2701,54 @@ private:
       return true;
     }
 
-    if (!vector_glyph_font_.available()) {
+    const std::string stroke_color = StrokeColorForEntity(data);
+    const ResolvedFontChoice font_choice = ResolveFontChoice(data);
+    const HorizontalTextAlignment horizontal_alignment =
+        HorizontalAlignmentForText(data, multiline);
+    const VerticalTextAlignment vertical_alignment =
+        VerticalAlignmentForText(data, multiline);
+    const double resolved_height =
+        std::max(data.height, 1.0) * font_choice.height_scale_correction;
+    ImportedDxfText imported_text;
+    imported_text.label = multiline ? "MTEXT" : "TEXT";
+    imported_text.source_text = text;
+    imported_text.multiline = multiline;
+    imported_text.anchor_point = ImVec2(static_cast<float>(data.basePoint.x),
+                                        static_cast<float>(data.basePoint.y));
+    imported_text.text_height = static_cast<float>(resolved_height);
+    imported_text.width_scale = static_cast<float>(
+        std::max<double>(std::abs(multiline ? 1.0 : data.widthscale), 0.1) *
+        font_choice.width_scale_correction);
+    imported_text.rotation_degrees = static_cast<float>(data.angle);
+    imported_text.horizontal_alignment =
+        ToImportedTextHorizontalAlignment(horizontal_alignment);
+    imported_text.vertical_alignment =
+        ToImportedTextVerticalAlignment(vertical_alignment);
+    imported_text.line_spacing_factor =
+        static_cast<float>(std::max(line_spacing_factor, 0.1));
+    imported_text.stroke_color = ParseHexColor(stroke_color);
+    imported_text.stroke_width = static_cast<float>(StrokeWidthForEntity(data));
+    imported_text.requested_font_file = font_choice.requested_font;
+    imported_text.resolved_font_path = font_choice.resolved_path.string();
+    const double widthscale =
+        std::max<double>(std::abs(multiline ? 1.0 : data.widthscale), 0.1) *
+        font_choice.width_scale_correction;
+    if (font_choice.resolved_path.empty() ||
+        !vector_glyph_font_.LoadFont(font_choice.resolved_path)) {
       return false;
     }
-
-    const std::string stroke_color = StrokeColorForEntity(data);
-    const double widthscale =
-        std::max<double>(std::abs(multiline ? 1.0 : data.widthscale), 0.1);
-    const bool emitted = vector_glyph_font_.AppendTextSvg(
-        text, data.basePoint.x, data.basePoint.y, std::max(data.height, 1.0),
-        widthscale, data.angle, HorizontalAlignmentForText(data, multiline),
-        VerticalAlignmentForText(data, multiline), line_spacing_factor,
-        stroke_color, kDxfFilledTextColor, CurrentBody(),
+    const bool emitted = vector_glyph_font_.BuildTextGeometry(
+        text, data.basePoint.x, data.basePoint.y, resolved_height, widthscale,
+        data.angle, horizontal_alignment, vertical_alignment,
+        line_spacing_factor, &imported_text,
         [this](double x, double y) { UpdateBounds(x, y); });
     if (!emitted) {
       return false;
     }
 
-    RecordFontResolution(data, true);
+    RecordUsedVectorFont(font_choice.resolved_path);
+    RecordFontResolution(data, true, font_choice, &imported_text);
+    CurrentFragment().dxf_text.push_back(std::move(imported_text));
 
     if (multiline) {
       vectorized_mtext_count_ += 1;
@@ -1928,10 +2765,13 @@ private:
       return;
     }
 
+    const ResolvedFontChoice font_choice = ResolveFontChoice(data);
     const std::vector<std::string> lines = SplitTextLines(text);
-    const double height = std::max(data.height, 1.0);
+    const double height =
+        std::max(data.height, 1.0) * font_choice.height_scale_correction;
     const double width_factor =
-        multiline ? 1.0 : std::max(std::abs(data.widthscale), 0.5);
+        (multiline ? 1.0 : std::max(std::abs(data.widthscale), 0.5)) *
+        font_choice.width_scale_correction;
     size_t longest_line = 1;
     for (const std::string &line : lines) {
       longest_line = std::max(longest_line, line.size());
@@ -1980,46 +2820,49 @@ private:
     const std::string stroke_color = StrokeColorForEntity(data);
     UpdateBounds(x, y);
     UpdateBounds(x + width, y + total_height);
-    CurrentBody() << "<path d=\"M " << FormatNumber(x) << ' ' << FormatNumber(y)
-                  << " L " << FormatNumber(x + width) << ' ' << FormatNumber(y)
-                  << " L " << FormatNumber(x + width) << ' '
-                  << FormatNumber(y + total_height) << " L " << FormatNumber(x)
-                  << ' ' << FormatNumber(y + total_height) << " Z\" stroke=\""
-                  << stroke_color
-                  << "\" stroke-width=\"0.75\" stroke-dasharray=\"3 2\" fill=\""
-                  << SvgHexColor(kDxfTextPlaceholderColor)
-                  << "\" fill-opacity=\"0\" />\n";
-    CurrentBody() << "<path d=\"M " << FormatNumber(x) << ' '
-                  << FormatNumber(mid_y - guide_half_height) << " L "
-                  << FormatNumber(x + width) << ' '
-                  << FormatNumber(mid_y - guide_half_height) << " L "
-                  << FormatNumber(x + width) << ' '
-                  << FormatNumber(mid_y + guide_half_height) << " L "
-                  << FormatNumber(x) << ' '
-                  << FormatNumber(mid_y + guide_half_height) << " Z\" stroke=\""
-                  << stroke_color << "\" stroke-width=\"0.5\" fill=\""
-                  << SvgHexColor(kDxfTextPlaceholderColor)
-                  << "\" fill-opacity=\"0\" />\n";
-    RecordFontResolution(data, false);
+    ImportedDxfText imported_text;
+    imported_text.label = multiline ? "MTEXT" : "TEXT";
+    imported_text.source_text = text;
+    imported_text.multiline = multiline;
+    imported_text.anchor_point = ImVec2(static_cast<float>(data.basePoint.x),
+                                        static_cast<float>(data.basePoint.y));
+    imported_text.text_height = static_cast<float>(height);
+    imported_text.width_scale = static_cast<float>(width_factor);
+    imported_text.rotation_degrees = static_cast<float>(data.angle);
+    imported_text.horizontal_alignment =
+        ToImportedTextHorizontalAlignment(horizontal_alignment);
+    imported_text.vertical_alignment =
+        ToImportedTextVerticalAlignment(vertical_alignment);
+    imported_text.line_spacing_factor = multiline ? 1.2f : 1.0f;
+    imported_text.stroke_color = ParseHexColor(stroke_color);
+    imported_text.stroke_width = 1.0f;
+    imported_text.placeholder_only = true;
+    imported_text.requested_font_file = font_choice.requested_font;
+    imported_text.resolved_font_path = font_choice.resolved_path.string();
+    imported_text.placeholder_contours.push_back(BuildClosedContour(
+        {ImVec2(static_cast<float>(x), static_cast<float>(y)),
+         ImVec2(static_cast<float>(x + width), static_cast<float>(y)),
+         ImVec2(static_cast<float>(x + width),
+                static_cast<float>(y + total_height)),
+         ImVec2(static_cast<float>(x), static_cast<float>(y + total_height))},
+        ImportedTextContourRole::Guide, "Placeholder Bounds"));
+    imported_text.placeholder_contours.push_back(BuildClosedContour(
+        {ImVec2(static_cast<float>(x),
+                static_cast<float>(mid_y - guide_half_height)),
+         ImVec2(static_cast<float>(x + width),
+                static_cast<float>(mid_y - guide_half_height)),
+         ImVec2(static_cast<float>(x + width),
+                static_cast<float>(mid_y + guide_half_height)),
+         ImVec2(static_cast<float>(x),
+                static_cast<float>(mid_y + guide_half_height))},
+        ImportedTextContourRole::Guide, "Placeholder Guide"));
+    RecordFontResolution(data, false, font_choice, &imported_text);
+    CurrentFragment().dxf_text.push_back(std::move(imported_text));
     if (multiline) {
       approximated_mtext_count_ += 1;
     } else {
       approximated_text_count_ += 1;
     }
-  }
-
-  DRW_Coord TransformInsertPoint(const SvgBlock &block,
-                                 const DRW_Insert &insert, int col, int row,
-                                 double x, double y) {
-    const double local_x = (x - block.base_point.x) * insert.xscale;
-    const double local_y = (y - block.base_point.y) * insert.yscale;
-    const double cosine = std::cos(insert.angle);
-    const double sine = std::sin(insert.angle);
-    const double rotated_x = local_x * cosine - local_y * sine;
-    const double rotated_y = local_x * sine + local_y * cosine;
-    return DRW_Coord(insert.basePoint.x + rotated_x + col * insert.colspace,
-                     insert.basePoint.y + rotated_y + row * insert.rowspace,
-                     0.0);
   }
 
   void AppendBlockInstance(const SvgBlock &block, const DRW_Insert &insert,
@@ -2061,6 +2904,13 @@ private:
       const DRW_Coord transformed =
           TransformInsertPoint(block, insert, col, row, corner.x, corner.y);
       UpdateFragmentBounds(target_fragment, transformed.x, transformed.y);
+    }
+
+    for (const ImportedDxfText &text : block.fragment.dxf_text) {
+      ImportedDxfText transformed_text =
+          TransformImportedDxfText(block, insert, col, row, text);
+      UpdateFragmentBoundsFromDxfText(target_fragment, transformed_text);
+      target_fragment.dxf_text.push_back(std::move(transformed_text));
     }
   }
 
@@ -2152,8 +3002,12 @@ private:
   std::unordered_map<std::string, SvgBlock> blocks_;
   std::unordered_map<std::string, int> skipped_entities_;
   std::unordered_map<std::string, TextStyleInfo> text_styles_;
+  std::unordered_map<std::string, DxfFontPolicyEntry> font_policy_ =
+      LoadDxfFontPolicy();
   std::unordered_set<std::string> font_resolution_note_set_;
+  std::unordered_set<std::string> used_vector_font_path_set_;
   std::vector<std::string> font_resolution_notes_;
+  std::vector<std::string> used_vector_font_paths_;
   int imported_3dface_count_ = 0;
   int skipped_3dface_limit_count_ = 0;
   int vectorized_text_count_ = 0;
@@ -2203,7 +3057,8 @@ ImportResult ImportDxfFile(CanvasState &state,
   }
 
   const std::string svg_data = adapter.BuildSvg();
-  if (svg_data.empty()) {
+  std::vector<ImportedDxfText> imported_text = adapter.TakeDxfText();
+  if (svg_data.empty() && imported_text.empty()) {
     ImportResult result;
     result.success = false;
     result.message = "DXF file did not produce importable SVG geometry.";
@@ -2215,15 +3070,36 @@ ImportResult ImportDxfFile(CanvasState &state,
     return result;
   }
 
-  ImportSvgOptions svg_options;
-  svg_options.mark_text_placeholders = true;
-  svg_options.text_placeholder_color = kDxfTextPlaceholderColor;
-  svg_options.text_filled_glyph_color = kDxfFilledTextColor;
-  svg_options.text_hole_glyph_color = kDxfHoleTextColor;
+  ImportResult result;
+  if (!svg_data.empty()) {
+    result = ImportSvgData(state, svg_data, file_path.filename().string(),
+                           file_path.string());
+  } else {
+    ImportedArtwork artwork;
+    artwork.name = file_path.filename().string();
+    artwork.source_path = file_path.string();
+    artwork.source_format = "DXF";
+    ImportedGroup root_group;
+    root_group.id = artwork.next_group_id++;
+    root_group.label = "Document";
+    artwork.root_group_id = root_group.id;
+    artwork.groups.push_back(std::move(root_group));
+    if (ImportedGroup *root = FindImportedGroup(artwork, artwork.root_group_id);
+        root != nullptr) {
+      for (ImportedDxfText &text : imported_text) {
+        text.id = artwork.next_dxf_text_id++;
+        text.parent_group_id = artwork.root_group_id;
+        root->dxf_text_ids.push_back(text.id);
+        artwork.dxf_text.push_back(std::move(text));
+      }
+    }
+    imported_text.clear();
+    RecomputeImportedArtworkBounds(artwork);
+    RecomputeImportedHierarchyBounds(artwork);
+    result.success = true;
+    result.artwork_id = AppendImportedArtwork(state, std::move(artwork));
+  }
 
-  ImportResult result =
-      ImportSvgData(state, svg_data, file_path.filename().string(),
-                    file_path.string(), svg_options);
   result.skipped_items_count += adapter.skipped_item_count();
   std::vector<std::string> dxf_notes = adapter.BuildNotes();
   result.notes.insert(result.notes.end(), dxf_notes.begin(), dxf_notes.end());
@@ -2231,14 +3107,28 @@ ImportResult ImportDxfFile(CanvasState &state,
   if (result.success) {
     for (ImportedArtwork &artwork : state.imported_artwork) {
       if (artwork.id == result.artwork_id) {
+        if (!imported_text.empty()) {
+          ImportedGroup *root =
+              FindImportedGroup(artwork, artwork.root_group_id);
+          for (ImportedDxfText &text : imported_text) {
+            text.id = artwork.next_dxf_text_id++;
+            text.parent_group_id = artwork.root_group_id;
+            if (root != nullptr) {
+              root->dxf_text_ids.push_back(text.id);
+            }
+            artwork.dxf_text.push_back(std::move(text));
+          }
+          imported_text.clear();
+          RecomputeImportedArtworkBounds(artwork);
+          RecomputeImportedHierarchyBounds(artwork);
+        }
         artwork.source_format = "DXF";
         artwork.source_path = file_path.string();
         break;
       }
     }
     FlipImportedArtworkVertical(state, result.artwork_id);
-    result.message =
-        "Imported DXF sample via libdxfrw -> SVG and flipped vertically.";
+    result.message = "Imported DXF sample and flipped vertically.";
     if (result.warnings_count > 0) {
       log::GetLogger()->warn("DXF import completed with {} warning(s): {}",
                              result.warnings_count, file_path.string());

@@ -37,6 +37,9 @@ const ImportedGroup *FindImportedGroup(const ImportedArtwork &artwork,
 ImportedPath *FindImportedPath(ImportedArtwork &artwork, int path_id);
 const ImportedPath *FindImportedPath(const ImportedArtwork &artwork,
                                      int path_id);
+ImportedDxfText *FindImportedDxfText(ImportedArtwork &artwork, int text_id);
+const ImportedDxfText *FindImportedDxfText(const ImportedArtwork &artwork,
+                                           int text_id);
 ImVec2 ImportedArtworkPointToWorld(const ImportedArtwork &artwork,
                                    const ImVec2 &point);
 void ImportedLocalBoundsToWorldBounds(const ImportedArtwork &artwork,

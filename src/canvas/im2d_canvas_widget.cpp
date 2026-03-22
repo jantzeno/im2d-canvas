@@ -8,6 +8,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 #include <imgui_internal.h>
 
@@ -46,6 +47,7 @@ struct TransientCanvasState {
   int context_imported_artwork_id = 0;
   int dragging_imported_artwork_id = 0;
   int resizing_imported_artwork_id = 0;
+  ImVec2 imported_artwork_resize_initial_scale = ImVec2(1.0f, 1.0f);
   int selected_working_area_id = 0;
   int dragging_working_area_id = 0;
   int resizing_working_area_id = 0;
@@ -145,6 +147,20 @@ bool TryGetImportedDebugScreenRect(const CanvasState &state,
     ImVec2 world_max;
     ImportedLocalBoundsToWorldBounds(artwork, path->bounds_min,
                                      path->bounds_max, &world_min, &world_max);
+    *screen_rect =
+        WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
+    return true;
+  }
+  case ImportedDebugSelectionKind::DxfText: {
+    const ImportedDxfText *text =
+        FindImportedDxfText(artwork, state.selected_imported_debug.item_id);
+    if (text == nullptr) {
+      return false;
+    }
+    ImVec2 world_min;
+    ImVec2 world_max;
+    ImportedLocalBoundsToWorldBounds(artwork, text->bounds_min,
+                                     text->bounds_max, &world_min, &world_max);
     *screen_rect =
         WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
     return true;
@@ -289,6 +305,285 @@ void RemoveGuide(CanvasState &state, int guide_id) {
   });
 }
 
+ImVec2 CubicBezierPoint(const ImVec2 &start, const ImVec2 &control1,
+                        const ImVec2 &control2, const ImVec2 &end, float t) {
+  const float mt = 1.0f - t;
+  const float mt2 = mt * mt;
+  const float t2 = t * t;
+  return ImVec2(mt2 * mt * start.x + 3.0f * mt2 * t * control1.x +
+                    3.0f * mt * t2 * control2.x + t2 * t * end.x,
+                mt2 * mt * start.y + 3.0f * mt2 * t * control1.y +
+                    3.0f * mt * t2 * control2.y + t2 * t * end.y);
+}
+
+void FlattenImportedTextContour(const ImportedTextContour &contour,
+                                std::vector<ImVec2> *points) {
+  points->clear();
+  if (contour.segments.empty()) {
+    return;
+  }
+
+  points->push_back(contour.segments.front().start);
+  for (const ImportedPathSegment &segment : contour.segments) {
+    if (segment.kind == ImportedPathSegmentKind::Line) {
+      points->push_back(segment.end);
+      continue;
+    }
+
+    constexpr int kCurveSamples = 12;
+    for (int sample_index = 1; sample_index <= kCurveSamples; ++sample_index) {
+      const float t =
+          static_cast<float>(sample_index) / static_cast<float>(kCurveSamples);
+      points->push_back(CubicBezierPoint(segment.start, segment.control1,
+                                         segment.control2, segment.end, t));
+    }
+  }
+
+  if (points->size() > 1) {
+    const ImVec2 &first = points->front();
+    const ImVec2 &last = points->back();
+    if (std::abs(first.x - last.x) < 0.001f &&
+        std::abs(first.y - last.y) < 0.001f) {
+      points->pop_back();
+    }
+  }
+}
+
+float PolygonSignedArea(const std::vector<ImVec2> &polygon) {
+  if (polygon.size() < 3) {
+    return 0.0f;
+  }
+
+  float twice_area = 0.0f;
+  for (size_t index = 0; index < polygon.size(); ++index) {
+    const ImVec2 &current = polygon[index];
+    const ImVec2 &next = polygon[(index + 1) % polygon.size()];
+    twice_area += current.x * next.y - next.x * current.y;
+  }
+  return twice_area * 0.5f;
+}
+
+void EnsureCounterClockwise(std::vector<ImVec2> *polygon) {
+  if (PolygonSignedArea(*polygon) < 0.0f) {
+    std::reverse(polygon->begin(), polygon->end());
+  }
+}
+
+void EnsureClockwise(std::vector<ImVec2> *polygon) {
+  if (PolygonSignedArea(*polygon) > 0.0f) {
+    std::reverse(polygon->begin(), polygon->end());
+  }
+}
+
+bool PointInPolygon(const std::vector<ImVec2> &polygon, const ImVec2 &point) {
+  bool inside = false;
+  for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+    const ImVec2 &a = polygon[i];
+    const ImVec2 &b = polygon[j];
+    const bool intersects =
+        ((a.y > point.y) != (b.y > point.y)) &&
+        (point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y + 1e-6f) + a.x);
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+size_t FindNearestPolygonVertex(const std::vector<ImVec2> &polygon,
+                                const ImVec2 &point) {
+  size_t best_index = 0;
+  float best_distance_sq = std::numeric_limits<float>::max();
+  for (size_t index = 0; index < polygon.size(); ++index) {
+    const float dx = polygon[index].x - point.x;
+    const float dy = polygon[index].y - point.y;
+    const float distance_sq = dx * dx + dy * dy;
+    if (distance_sq < best_distance_sq) {
+      best_distance_sq = distance_sq;
+      best_index = index;
+    }
+  }
+  return best_index;
+}
+
+size_t FindRightmostVertex(const std::vector<ImVec2> &polygon) {
+  size_t best_index = 0;
+  for (size_t index = 1; index < polygon.size(); ++index) {
+    if (polygon[index].x > polygon[best_index].x ||
+        (polygon[index].x == polygon[best_index].x &&
+         polygon[index].y < polygon[best_index].y)) {
+      best_index = index;
+    }
+  }
+  return best_index;
+}
+
+void BridgeHoleIntoPolygon(std::vector<ImVec2> *polygon,
+                           const std::vector<ImVec2> &hole) {
+  if (polygon->empty() || hole.empty()) {
+    return;
+  }
+
+  const size_t hole_index = FindRightmostVertex(hole);
+  const size_t polygon_index =
+      FindNearestPolygonVertex(*polygon, hole[hole_index]);
+
+  std::vector<ImVec2> bridged;
+  bridged.reserve(polygon->size() + hole.size() + 2);
+  bridged.insert(bridged.end(), polygon->begin(),
+                 polygon->begin() +
+                     static_cast<std::ptrdiff_t>(polygon_index + 1));
+  for (size_t offset = 0; offset < hole.size(); ++offset) {
+    const size_t index = (hole_index + offset) % hole.size();
+    bridged.push_back(hole[index]);
+  }
+  bridged.push_back(hole[hole_index]);
+  bridged.push_back((*polygon)[polygon_index]);
+  bridged.insert(bridged.end(),
+                 polygon->begin() +
+                     static_cast<std::ptrdiff_t>(polygon_index + 1),
+                 polygon->end());
+  *polygon = std::move(bridged);
+}
+
+std::vector<std::vector<ImVec2>>
+BuildGlyphFillPolygons(const ImportedTextGlyph &glyph) {
+  struct OuterPolygon {
+    std::vector<ImVec2> outline;
+    std::vector<std::vector<ImVec2>> holes;
+  };
+
+  std::vector<OuterPolygon> outers;
+  std::vector<std::vector<ImVec2>> holes;
+  std::vector<ImVec2> flattened;
+
+  for (const ImportedTextContour &contour : glyph.contours) {
+    if (!contour.closed) {
+      continue;
+    }
+    FlattenImportedTextContour(contour, &flattened);
+    if (flattened.size() < 3) {
+      continue;
+    }
+
+    if (contour.role == ImportedTextContourRole::Hole) {
+      EnsureClockwise(&flattened);
+      holes.push_back(flattened);
+      continue;
+    }
+
+    EnsureCounterClockwise(&flattened);
+    outers.push_back(OuterPolygon{flattened, {}});
+  }
+
+  for (const std::vector<ImVec2> &hole : holes) {
+    bool assigned = false;
+    for (OuterPolygon &outer : outers) {
+      if (!outer.outline.empty() &&
+          PointInPolygon(outer.outline, hole.front())) {
+        outer.holes.push_back(hole);
+        assigned = true;
+        break;
+      }
+    }
+    if (!assigned && !outers.empty()) {
+      outers.front().holes.push_back(hole);
+    }
+  }
+
+  std::vector<std::vector<ImVec2>> polygons;
+  polygons.reserve(outers.size());
+  for (OuterPolygon &outer : outers) {
+    std::vector<ImVec2> polygon = outer.outline;
+    for (const std::vector<ImVec2> &hole : outer.holes) {
+      BridgeHoleIntoPolygon(&polygon, hole);
+    }
+    if (polygon.size() >= 3) {
+      polygons.push_back(std::move(polygon));
+    }
+  }
+  return polygons;
+}
+
+void AppendImportedTextContourPath(ImDrawList *draw_list,
+                                   const CanvasState &state,
+                                   const ImRect &canvas_rect,
+                                   const ImportedArtwork &artwork,
+                                   const ImportedTextContour &contour) {
+  if (contour.segments.empty()) {
+    return;
+  }
+
+  draw_list->PathClear();
+  const ImVec2 first_world =
+      ImportedArtworkPointToWorld(artwork, contour.segments.front().start);
+  draw_list->PathLineTo(WorldToScreen(state, canvas_rect.Min, first_world));
+  for (const ImportedPathSegment &segment : contour.segments) {
+    const ImVec2 end_world = ImportedArtworkPointToWorld(artwork, segment.end);
+    if (segment.kind == ImportedPathSegmentKind::Line) {
+      draw_list->PathLineTo(WorldToScreen(state, canvas_rect.Min, end_world));
+      continue;
+    }
+
+    const ImVec2 control1_world =
+        ImportedArtworkPointToWorld(artwork, segment.control1);
+    const ImVec2 control2_world =
+        ImportedArtworkPointToWorld(artwork, segment.control2);
+    draw_list->PathBezierCubicCurveTo(
+        WorldToScreen(state, canvas_rect.Min, control1_world),
+        WorldToScreen(state, canvas_rect.Min, control2_world),
+        WorldToScreen(state, canvas_rect.Min, end_world));
+  }
+}
+
+void DrawImportedDxfText(ImDrawList *draw_list, const CanvasState &state,
+                         const ImRect &canvas_rect,
+                         const ImportedArtwork &artwork,
+                         const ImportedDxfText &text) {
+  const ImU32 packed_color = ImGui::ColorConvertFloat4ToU32(text.stroke_color);
+  const float outline_thickness =
+      text.placeholder_only ? std::max(1.0f, text.stroke_width)
+                            : std::max(1.0f, text.stroke_width * 0.35f);
+
+  if (!text.placeholder_only) {
+    for (const ImportedTextGlyph &glyph : text.glyphs) {
+      const std::vector<std::vector<ImVec2>> polygons =
+          BuildGlyphFillPolygons(glyph);
+      for (const std::vector<ImVec2> &local_polygon : polygons) {
+        if (local_polygon.size() < 3) {
+          continue;
+        }
+
+        std::vector<ImVec2> screen_polygon;
+        screen_polygon.reserve(local_polygon.size());
+        for (const ImVec2 &point : local_polygon) {
+          const ImVec2 world = ImportedArtworkPointToWorld(artwork, point);
+          screen_polygon.push_back(
+              WorldToScreen(state, canvas_rect.Min, world));
+        }
+        draw_list->AddConcavePolyFilled(screen_polygon.data(),
+                                        static_cast<int>(screen_polygon.size()),
+                                        packed_color);
+      }
+    }
+  }
+
+  for (const ImportedTextGlyph &glyph : text.glyphs) {
+    for (const ImportedTextContour &contour : glyph.contours) {
+      AppendImportedTextContourPath(draw_list, state, canvas_rect, artwork,
+                                    contour);
+      draw_list->PathStroke(packed_color, contour.closed, outline_thickness);
+    }
+  }
+
+  for (const ImportedTextContour &contour : text.placeholder_contours) {
+    AppendImportedTextContourPath(draw_list, state, canvas_rect, artwork,
+                                  contour);
+    draw_list->PathStroke(packed_color, contour.closed,
+                          std::max(1.0f, text.stroke_width));
+  }
+}
+
 void DrawGrid(ImDrawList *draw_list, const CanvasState &state,
               const ImRect &canvas_rect) {
   if (!state.grid.visible || state.grid.spacing <= 0.0f ||
@@ -385,6 +680,14 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
   for (const ImportedArtwork &artwork : state.imported_artwork) {
     if (!artwork.visible) {
       continue;
+    }
+
+    for (const ImportedDxfText &text : artwork.dxf_text) {
+      if (text.placeholder_only && artwork.source_format == "DXF" &&
+          !state.show_imported_dxf_text) {
+        continue;
+      }
+      DrawImportedDxfText(draw_list, state, canvas_rect, artwork, text);
     }
 
     for (const ImportedPath &path : artwork.paths) {
@@ -808,6 +1111,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                                    ImportedArtworkFlagResizable)) {
           transient_state.resizing_imported_artwork_id =
               imported_artwork_hit.id;
+          transient_state.imported_artwork_resize_initial_scale =
+              artwork->scale;
         } else if (imported_artwork_hit.zone == ImportedArtworkHitZone::Body &&
                    HasImportedArtworkFlag(artwork->flags,
                                           ImportedArtworkFlagMovable)) {
@@ -892,10 +1197,26 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         const ImVec2 target_scale(
             std::max(target_size.x / local_size.x, 0.01f),
             std::max(target_size.y / local_size.y, 0.01f));
-        UpdateImportedArtworkScaleFromTarget(*artwork, target_scale);
+        if (!IsImportedArtworkScaleRatioLocked(*artwork)) {
+          UpdateImportedArtworkScaleFromTarget(*artwork, target_scale);
+        } else {
+          const float base_x = std::max(
+              transient_state.imported_artwork_resize_initial_scale.x, 0.01f);
+          const float base_y = std::max(
+              transient_state.imported_artwork_resize_initial_scale.y, 0.01f);
+          const float factor_x = target_scale.x / base_x;
+          const float factor_y = target_scale.y / base_y;
+          const float chosen_factor =
+              std::abs(factor_x - 1.0f) >= std::abs(factor_y - 1.0f) ? factor_x
+                                                                     : factor_y;
+          artwork->scale.x = std::max(base_x * chosen_factor, 0.01f);
+          artwork->scale.y = std::max(base_y * chosen_factor, 0.01f);
+        }
       }
     } else {
       transient_state.resizing_imported_artwork_id = 0;
+      transient_state.imported_artwork_resize_initial_scale =
+          ImVec2(1.0f, 1.0f);
     }
   }
 
@@ -1012,6 +1333,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         transient_state.context_imported_artwork_id = 0;
         transient_state.dragging_imported_artwork_id = 0;
         transient_state.resizing_imported_artwork_id = 0;
+        transient_state.imported_artwork_resize_initial_scale =
+            ImVec2(1.0f, 1.0f);
         ImGui::CloseCurrentPopup();
       }
     }

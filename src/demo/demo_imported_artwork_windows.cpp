@@ -37,6 +37,13 @@ void SelectImportedPath(im2d::CanvasState &state, int artwork_id, int path_id) {
                                    artwork_id, path_id};
 }
 
+void SelectImportedDxfText(im2d::CanvasState &state, int artwork_id,
+                           int text_id) {
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::DxfText,
+                                   artwork_id, text_id};
+}
+
 bool IsSelectedImportedDebugItem(const im2d::CanvasState &state, int artwork_id,
                                  im2d::ImportedDebugSelectionKind kind,
                                  int item_id) {
@@ -67,6 +74,20 @@ std::string ImportedPathSummary(const im2d::ImportedPath &path) {
   return summary;
 }
 
+std::string ImportedDxfTextSummary(const im2d::ImportedDxfText &text) {
+  std::string summary = text.label.empty() ? "DXF Text" : text.label;
+  if (text.placeholder_only) {
+    summary += " (placeholder";
+  } else {
+    summary += " (glyphs=" + std::to_string(text.glyphs.size());
+  }
+  if (!text.source_text.empty()) {
+    summary += ", \"" + text.source_text + "\"";
+  }
+  summary += ')';
+  return summary;
+}
+
 void DrawImportedPathNode(im2d::CanvasState &state,
                           const im2d::ImportedArtwork &artwork,
                           const im2d::ImportedPath &path) {
@@ -81,6 +102,25 @@ void DrawImportedPathNode(im2d::CanvasState &state,
                     flags, "%s", ImportedPathSummary(path).c_str());
   if (ImGui::IsItemClicked()) {
     SelectImportedPath(state, artwork.id, path.id);
+  }
+}
+
+void DrawImportedDxfTextNode(im2d::CanvasState &state,
+                             const im2d::ImportedArtwork &artwork,
+                             const im2d::ImportedDxfText &text) {
+  const ImGuiTreeNodeFlags flags =
+      ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+      ImGuiTreeNodeFlags_SpanAvailWidth |
+      (IsSelectedImportedDebugItem(state, artwork.id,
+                                   im2d::ImportedDebugSelectionKind::DxfText,
+                                   text.id)
+           ? ImGuiTreeNodeFlags_Selected
+           : 0);
+  ImGui::TreeNodeEx(
+      reinterpret_cast<void *>(static_cast<intptr_t>(1000000 + text.id)), flags,
+      "%s", ImportedDxfTextSummary(text).c_str());
+  if (ImGui::IsItemClicked()) {
+    SelectImportedDxfText(state, artwork.id, text.id);
   }
 }
 
@@ -118,6 +158,14 @@ void DrawImportedGroupNode(im2d::CanvasState &state,
     const im2d::ImportedPath *path = im2d::FindImportedPath(artwork, path_id);
     if (path != nullptr) {
       DrawImportedPathNode(state, artwork, *path);
+    }
+  }
+
+  for (const int text_id : group.dxf_text_ids) {
+    const im2d::ImportedDxfText *text =
+        im2d::FindImportedDxfText(artwork, text_id);
+    if (text != nullptr) {
+      DrawImportedDxfTextNode(state, artwork, *text);
     }
   }
 
@@ -162,9 +210,19 @@ void DrawImportedDebugTree(im2d::CanvasState &state,
         DrawImportedPathNode(state, artwork, *path);
       }
     }
+    for (const int text_id : root_group->dxf_text_ids) {
+      const im2d::ImportedDxfText *text =
+          im2d::FindImportedDxfText(artwork, text_id);
+      if (text != nullptr) {
+        DrawImportedDxfTextNode(state, artwork, *text);
+      }
+    }
   } else {
     for (const im2d::ImportedPath &path : artwork.paths) {
       DrawImportedPathNode(state, artwork, path);
+    }
+    for (const im2d::ImportedDxfText &text : artwork.dxf_text) {
+      DrawImportedDxfTextNode(state, artwork, text);
     }
   }
 
@@ -284,6 +342,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   ImGui::Text("Groups: %d",
               std::max(static_cast<int>(artwork->groups.size()) - 1, 0));
   ImGui::Text("Paths: %d", static_cast<int>(artwork->paths.size()));
+  ImGui::Text("DXF Text: %d", static_cast<int>(artwork->dxf_text.size()));
   DrawImportedDebugTree(state, *artwork);
   ImGui::Separator();
 
