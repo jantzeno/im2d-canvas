@@ -91,13 +91,6 @@ ImVec2 ImportedArtworkScaledSize(const ImportedArtwork &artwork) {
                 std::max(local_size.y * artwork.scale.y, 1.0f));
 }
 
-ImVec2 ImportedArtworkPointToWorld(const ImportedArtwork &artwork,
-                                   const ImVec2 &point) {
-  return ImVec2(
-      artwork.origin.x + (point.x - artwork.bounds_min.x) * artwork.scale.x,
-      artwork.origin.y + (point.y - artwork.bounds_min.y) * artwork.scale.y);
-}
-
 ImRect ImportedArtworkScreenRect(const CanvasState &state,
                                  const ImVec2 &canvas_min,
                                  const ImportedArtwork &artwork) {
@@ -106,6 +99,61 @@ ImRect ImportedArtworkScreenRect(const CanvasState &state,
                 WorldToScreen(state, canvas_min,
                               ImVec2(artwork.origin.x + size.x,
                                      artwork.origin.y + size.y)));
+}
+
+ImRect WorldRectToScreenRect(const CanvasState &state, const ImVec2 &canvas_min,
+                             const ImRect &world_rect) {
+  const ImVec2 min = WorldToScreen(state, canvas_min, world_rect.Min);
+  const ImVec2 max = WorldToScreen(state, canvas_min, world_rect.Max);
+  return ImRect(ImVec2(std::min(min.x, max.x), std::min(min.y, max.y)),
+                ImVec2(std::max(min.x, max.x), std::max(min.y, max.y)));
+}
+
+bool TryGetImportedDebugScreenRect(const CanvasState &state,
+                                   const ImVec2 &canvas_min,
+                                   const ImportedArtwork &artwork,
+                                   ImRect *screen_rect) {
+  if (state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  switch (state.selected_imported_debug.kind) {
+  case ImportedDebugSelectionKind::Artwork:
+    *screen_rect = ImportedArtworkScreenRect(state, canvas_min, artwork);
+    return true;
+  case ImportedDebugSelectionKind::Group: {
+    const ImportedGroup *group =
+        FindImportedGroup(artwork, state.selected_imported_debug.item_id);
+    if (group == nullptr) {
+      return false;
+    }
+    ImVec2 world_min;
+    ImVec2 world_max;
+    ImportedLocalBoundsToWorldBounds(artwork, group->bounds_min,
+                                     group->bounds_max, &world_min, &world_max);
+    *screen_rect =
+        WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
+    return true;
+  }
+  case ImportedDebugSelectionKind::Path: {
+    const ImportedPath *path =
+        FindImportedPath(artwork, state.selected_imported_debug.item_id);
+    if (path == nullptr) {
+      return false;
+    }
+    ImVec2 world_min;
+    ImVec2 world_max;
+    ImportedLocalBoundsToWorldBounds(artwork, path->bounds_min,
+                                     path->bounds_max, &world_min, &world_max);
+    *screen_rect =
+        WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
+    return true;
+  }
+  case ImportedDebugSelectionKind::None:
+    break;
+  }
+
+  return false;
 }
 
 float NiceStep(float raw_value) {
@@ -351,14 +399,14 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
 
       const auto append_path = [&]() {
         draw_list->PathClear();
-        const ImVec2 first_world =
-            ImportedArtworkPointToWorld(artwork, path.segments.front().start);
+        const ImVec2 first_world = ::im2d::ImportedArtworkPointToWorld(
+            artwork, path.segments.front().start);
         draw_list->PathLineTo(
             WorldToScreen(state, canvas_rect.Min, first_world));
 
         for (const ImportedPathSegment &segment : path.segments) {
           const ImVec2 end_world =
-              ImportedArtworkPointToWorld(artwork, segment.end);
+              ::im2d::ImportedArtworkPointToWorld(artwork, segment.end);
           if (segment.kind == ImportedPathSegmentKind::Line) {
             draw_list->PathLineTo(
                 WorldToScreen(state, canvas_rect.Min, end_world));
@@ -366,9 +414,9 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
           }
 
           const ImVec2 control1_world =
-              ImportedArtworkPointToWorld(artwork, segment.control1);
+              ::im2d::ImportedArtworkPointToWorld(artwork, segment.control1);
           const ImVec2 control2_world =
-              ImportedArtworkPointToWorld(artwork, segment.control2);
+              ::im2d::ImportedArtworkPointToWorld(artwork, segment.control2);
           draw_list->PathBezierCubicCurveTo(
               WorldToScreen(state, canvas_rect.Min, control1_world),
               WorldToScreen(state, canvas_rect.Min, control2_world),
@@ -406,12 +454,19 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
                                            : thickness);
     }
 
-    if (artwork.id == selected_imported_artwork_id) {
-      const ImRect screen_rect =
-          ImportedArtworkScreenRect(state, canvas_rect.Min, artwork);
+    ImRect screen_rect;
+    const bool has_debug_focus = TryGetImportedDebugScreenRect(
+        state, canvas_rect.Min, artwork, &screen_rect);
+    if (artwork.id == selected_imported_artwork_id || has_debug_focus) {
+      if (!has_debug_focus) {
+        screen_rect =
+            ImportedArtworkScreenRect(state, canvas_rect.Min, artwork);
+      }
       draw_list->AddRect(screen_rect.Min, screen_rect.Max, selected_color, 4.0f,
                          0, 2.0f);
-      if (HasImportedArtworkFlag(artwork.flags, ImportedArtworkFlagResizable)) {
+      if ((!has_debug_focus || state.selected_imported_debug.kind ==
+                                   ImportedDebugSelectionKind::Artwork) &&
+          HasImportedArtworkFlag(artwork.flags, ImportedArtworkFlagResizable)) {
         const ImRect handle_rect(
             ImVec2(screen_rect.Max.x - options.resize_handle_size,
                    screen_rect.Max.y - options.resize_handle_size),
@@ -741,6 +796,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       }
     } else if (imported_artwork_hit.id != 0) {
       state.selected_imported_artwork_id = imported_artwork_hit.id;
+      state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                       imported_artwork_hit.id, 0};
       transient_state.selected_working_area_id = 0;
       if (ImportedArtwork *artwork =
               FindImportedArtwork(state, imported_artwork_hit.id);
@@ -763,6 +820,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     } else if (area_hit.id != 0) {
       transient_state.selected_working_area_id = area_hit.id;
       state.selected_imported_artwork_id = 0;
+      ClearImportedDebugSelection(state);
       if (WorkingArea *area = FindWorkingArea(state, area_hit.id);
           area != nullptr) {
         const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
@@ -779,6 +837,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     } else {
       state.selected_imported_artwork_id = 0;
       transient_state.selected_working_area_id = 0;
+      ClearImportedDebugSelection(state);
     }
   }
 
@@ -830,8 +889,10 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         const ImVec2 local_size = ImportedArtworkLocalSize(*artwork);
         const ImVec2 target_size(bottom_right.x - artwork->origin.x,
                                  bottom_right.y - artwork->origin.y);
-        artwork->scale = ImVec2(std::max(target_size.x / local_size.x, 0.01f),
-                                std::max(target_size.y / local_size.y, 0.01f));
+        const ImVec2 target_scale(
+            std::max(target_size.x / local_size.x, 0.01f),
+            std::max(target_size.y / local_size.y, 0.01f));
+        UpdateImportedArtworkScaleFromTarget(*artwork, target_scale);
       }
     } else {
       transient_state.resizing_imported_artwork_id = 0;
@@ -879,6 +940,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     transient_state.context_imported_artwork_id = imported_artwork_hit.id;
     state.selected_imported_artwork_id = imported_artwork_hit.id;
+    state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                     imported_artwork_hit.id, 0};
     ImGui::OpenPopup("imported_artwork_context_menu");
   } else if (hovered_guide_id != 0 &&
              ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {

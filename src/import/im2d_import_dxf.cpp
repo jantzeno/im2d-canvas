@@ -251,6 +251,34 @@ std::string BasenameLower(std::string_view value) {
       std::filesystem::path(std::string(value)).filename().string());
 }
 
+std::string EscapeXmlAttribute(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (const char character : value) {
+    switch (character) {
+    case '&':
+      escaped += "&amp;";
+      break;
+    case '"':
+      escaped += "&quot;";
+      break;
+    case '\'':
+      escaped += "&apos;";
+      break;
+    case '<':
+      escaped += "&lt;";
+      break;
+    case '>':
+      escaped += "&gt;";
+      break;
+    default:
+      escaped.push_back(character);
+      break;
+    }
+  }
+  return escaped;
+}
+
 std::filesystem::path ResolveVectorFontPath() {
   if (const char *override_path = std::getenv("IM2D_DXF_TEXT_FONT");
       override_path != nullptr && override_path[0] != '\0') {
@@ -881,12 +909,20 @@ struct SvgFragment {
   double min_y = std::numeric_limits<double>::max();
   double max_x = std::numeric_limits<double>::lowest();
   double max_y = std::numeric_limits<double>::lowest();
+  struct PendingInsert {
+    std::string token;
+    DRW_Insert insert;
+  };
   std::ostringstream body;
+  std::vector<PendingInsert> pending_inserts;
 };
 
 struct SvgBlock {
+  std::string name;
   DRW_Coord base_point;
   SvgFragment fragment;
+  bool resolved = false;
+  bool resolving = false;
 };
 
 struct BulgeArcInfo {
@@ -1036,6 +1072,7 @@ public:
     current_block_name_ = data.name;
     SvgBlock &block = blocks_[current_block_name_];
     block = SvgBlock{};
+    block.name = data.name;
     block.base_point = data.basePoint;
   }
 
@@ -1173,17 +1210,7 @@ public:
   void addKnot(const DRW_Entity &) override {}
 
   void addInsert(const DRW_Insert &data) override {
-    auto it = blocks_.find(data.name);
-    if (it == blocks_.end() || !it->second.fragment.has_geometry) {
-      skipped_entities_["INSERT"] += 1;
-      return;
-    }
-
-    for (int row = 0; row < std::max(data.rowcount, 1); ++row) {
-      for (int col = 0; col < std::max(data.colcount, 1); ++col) {
-        AppendBlockInstance(it->second, data, col, row);
-      }
-    }
+    AppendDeferredInsert(data);
   }
 
   void addTrace(const DRW_Trace &data) override {
@@ -1426,6 +1453,9 @@ public:
       count += value;
     }
     count += skipped_3dface_limit_count_;
+    count += skipped_insert_missing_count_;
+    count += skipped_insert_empty_count_;
+    count += skipped_insert_recursive_count_;
     return count;
   }
 
@@ -1449,6 +1479,32 @@ public:
           " 3DFACE entities after reaching the import cap of " +
           std::to_string(kMaxImported3dFaces) +
           " to avoid freezing the canvas with dense 3D mesh geometry.");
+    }
+    if (skipped_insert_missing_count_ > 0) {
+      notes.push_back(
+          "Skipped " + std::to_string(skipped_insert_missing_count_) +
+          " INSERT " +
+          std::string(
+              skipped_insert_missing_count_ == 1
+                  ? "reference because its target block was missing."
+                  : "references because their target blocks were missing."));
+    }
+    if (skipped_insert_empty_count_ > 0) {
+      notes.push_back("Skipped " + std::to_string(skipped_insert_empty_count_) +
+                      " INSERT " +
+                      std::string(skipped_insert_empty_count_ == 1
+                                      ? "reference because its target block "
+                                        "resolved to no geometry."
+                                      : "references because their target "
+                                        "blocks resolved to no geometry."));
+    }
+    if (skipped_insert_recursive_count_ > 0) {
+      notes.push_back(
+          "Skipped " + std::to_string(skipped_insert_recursive_count_) +
+          " INSERT " +
+          std::string(skipped_insert_recursive_count_ == 1
+                          ? "reference to avoid recursive block expansion."
+                          : "references to avoid recursive block expansion."));
     }
     if (vectorized_text_count_ > 0) {
       notes.push_back("Rendered " + std::to_string(vectorized_text_count_) +
@@ -1490,7 +1546,21 @@ public:
     return notes;
   }
 
-  std::string BuildSvg() const {
+  void FinalizeGeometry() {
+    if (geometry_finalized_) {
+      return;
+    }
+
+    std::vector<std::string> resolution_stack;
+    for (auto &[block_name, _] : blocks_) {
+      ResolveBlock(block_name, resolution_stack);
+    }
+    ResolveFragment(model_, resolution_stack);
+    geometry_finalized_ = true;
+  }
+
+  std::string BuildSvg() {
+    FinalizeGeometry();
     if (!model_.has_geometry) {
       return {};
     }
@@ -1518,6 +1588,39 @@ private:
   };
 
   std::ostringstream &CurrentBody() { return CurrentFragment().body; }
+
+  static void ResetFragmentBody(SvgFragment &fragment,
+                                const std::string &body_text) {
+    fragment.body.str("");
+    fragment.body.clear();
+    fragment.body << body_text;
+  }
+
+  static void UpdateFragmentBounds(SvgFragment &fragment, double x, double y) {
+    fragment.has_geometry = true;
+    fragment.min_x = std::min(fragment.min_x, x);
+    fragment.min_y = std::min(fragment.min_y, y);
+    fragment.max_x = std::max(fragment.max_x, x);
+    fragment.max_y = std::max(fragment.max_y, y);
+  }
+
+  static void ReplaceFirst(std::string &text, const std::string &needle,
+                           const std::string &replacement) {
+    const size_t position = text.find(needle);
+    if (position == std::string::npos) {
+      text += replacement;
+      return;
+    }
+    text.replace(position, needle.size(), replacement);
+  }
+
+  void AppendDeferredInsert(const DRW_Insert &data) {
+    SvgFragment &fragment = CurrentFragment();
+    const std::string token =
+        "<!--IM2D_INSERT_" + std::to_string(next_insert_token_id_++) + "-->";
+    fragment.body << token;
+    fragment.pending_inserts.push_back(SvgFragment::PendingInsert{token, data});
+  }
 
   void RecordFontResolution(const DRW_Text &data, bool vectorized) {
     const auto style_it = text_styles_.find(data.style);
@@ -1563,11 +1666,7 @@ private:
 
   void UpdateBounds(double x, double y) {
     SvgFragment &fragment = CurrentFragment();
-    fragment.has_geometry = true;
-    fragment.min_x = std::min(fragment.min_x, x);
-    fragment.min_y = std::min(fragment.min_y, y);
-    fragment.max_x = std::max(fragment.max_x, x);
-    fragment.max_y = std::max(fragment.max_y, y);
+    UpdateFragmentBounds(fragment, x, y);
   }
 
   BulgeArcInfo BuildBulgeArc(double start_x, double start_y, double bulge,
@@ -1925,16 +2024,33 @@ private:
 
   void AppendBlockInstance(const SvgBlock &block, const DRW_Insert &insert,
                            int col, int row) {
+    AppendResolvedBlockInstance(CurrentFragment(), block, insert, col, row);
+  }
+
+  void AppendResolvedBlockInstance(SvgFragment &target_fragment,
+                                   const SvgBlock &block,
+                                   const DRW_Insert &insert, int col, int row) {
     const double tx = insert.basePoint.x + col * insert.colspace;
     const double ty = insert.basePoint.y + row * insert.rowspace;
-    CurrentBody() << "<g transform=\"translate(" << FormatNumber(tx) << ' '
-                  << FormatNumber(ty) << ") rotate("
-                  << FormatNumber(insert.angle * 180.0 / kPi) << ") scale("
-                  << FormatNumber(insert.xscale) << ' '
-                  << FormatNumber(insert.yscale) << ") translate("
-                  << FormatNumber(-block.base_point.x) << ' '
-                  << FormatNumber(-block.base_point.y) << ")\">\n"
-                  << block.fragment.body.str() << "</g>\n";
+    const int generated_group_id = next_generated_group_id_++;
+    const std::string dom_id =
+        "im2d-dxf-group-" + std::to_string(generated_group_id);
+    std::string group_label =
+        block.name.empty() ? "Block Instance" : "Block " + block.name;
+    if (std::max(insert.rowcount, 1) > 1 || std::max(insert.colcount, 1) > 1) {
+      group_label +=
+          " [" + std::to_string(row + 1) + "," + std::to_string(col + 1) + "]";
+    }
+    target_fragment.body << "<g id=\"" << dom_id << "\" data-im2d-label=\""
+                         << EscapeXmlAttribute(group_label)
+                         << "\" transform=\"translate(" << FormatNumber(tx)
+                         << ' ' << FormatNumber(ty) << ") rotate("
+                         << FormatNumber(insert.angle * 180.0 / kPi)
+                         << ") scale(" << FormatNumber(insert.xscale) << ' '
+                         << FormatNumber(insert.yscale) << ") translate("
+                         << FormatNumber(-block.base_point.x) << ' '
+                         << FormatNumber(-block.base_point.y) << ")\">\n"
+                         << block.fragment.body.str() << "</g>\n";
 
     const std::array<DRW_Coord, 4> corners = {
         DRW_Coord(block.fragment.min_x, block.fragment.min_y, 0.0),
@@ -1944,8 +2060,92 @@ private:
     for (const DRW_Coord &corner : corners) {
       const DRW_Coord transformed =
           TransformInsertPoint(block, insert, col, row, corner.x, corner.y);
-      UpdateBounds(transformed.x, transformed.y);
+      UpdateFragmentBounds(target_fragment, transformed.x, transformed.y);
     }
+  }
+
+  bool ResolveBlock(const std::string &block_name,
+                    std::vector<std::string> &resolution_stack) {
+    auto it = blocks_.find(block_name);
+    if (it == blocks_.end()) {
+      return false;
+    }
+
+    SvgBlock &block = it->second;
+    if (block.resolved) {
+      return block.fragment.has_geometry;
+    }
+    if (block.resolving) {
+      skipped_insert_recursive_count_ += 1;
+      return false;
+    }
+
+    block.resolving = true;
+    resolution_stack.push_back(block_name);
+    ResolveFragment(block.fragment, resolution_stack);
+    resolution_stack.pop_back();
+    block.resolving = false;
+    block.resolved = true;
+    return block.fragment.has_geometry;
+  }
+
+  bool ResolveFragment(SvgFragment &fragment,
+                       std::vector<std::string> &resolution_stack) {
+    if (fragment.pending_inserts.empty()) {
+      return fragment.has_geometry;
+    }
+
+    std::string resolved_body = fragment.body.str();
+    const std::vector<SvgFragment::PendingInsert> pending_inserts =
+        fragment.pending_inserts;
+    fragment.pending_inserts.clear();
+
+    for (const SvgFragment::PendingInsert &pending_insert : pending_inserts) {
+      std::ostringstream expansion;
+      auto block_it = blocks_.find(pending_insert.insert.name);
+      if (block_it == blocks_.end()) {
+        skipped_insert_missing_count_ += 1;
+        ReplaceFirst(resolved_body, pending_insert.token, std::string{});
+        continue;
+      }
+
+      const bool recursive_reference =
+          std::find(resolution_stack.begin(), resolution_stack.end(),
+                    pending_insert.insert.name) != resolution_stack.end();
+      if (recursive_reference) {
+        skipped_insert_recursive_count_ += 1;
+        ReplaceFirst(resolved_body, pending_insert.token, std::string{});
+        continue;
+      }
+
+      if (!ResolveBlock(pending_insert.insert.name, resolution_stack) ||
+          !block_it->second.fragment.has_geometry) {
+        skipped_insert_empty_count_ += 1;
+        ReplaceFirst(resolved_body, pending_insert.token, std::string{});
+        continue;
+      }
+
+      SvgFragment expansion_fragment;
+      for (int row = 0; row < std::max(pending_insert.insert.rowcount, 1);
+           ++row) {
+        for (int col = 0; col < std::max(pending_insert.insert.colcount, 1);
+             ++col) {
+          AppendResolvedBlockInstance(expansion_fragment, block_it->second,
+                                      pending_insert.insert, col, row);
+        }
+      }
+      ReplaceFirst(resolved_body, pending_insert.token,
+                   expansion_fragment.body.str());
+      if (expansion_fragment.has_geometry) {
+        UpdateFragmentBounds(fragment, expansion_fragment.min_x,
+                             expansion_fragment.min_y);
+        UpdateFragmentBounds(fragment, expansion_fragment.max_x,
+                             expansion_fragment.max_y);
+      }
+    }
+
+    ResetFragmentBody(fragment, resolved_body);
+    return fragment.has_geometry;
   }
 
   SvgFragment model_;
@@ -1960,6 +2160,12 @@ private:
   int vectorized_mtext_count_ = 0;
   int approximated_text_count_ = 0;
   int approximated_mtext_count_ = 0;
+  int skipped_insert_missing_count_ = 0;
+  int skipped_insert_empty_count_ = 0;
+  int skipped_insert_recursive_count_ = 0;
+  int next_insert_token_id_ = 1;
+  int next_generated_group_id_ = 1;
+  bool geometry_finalized_ = false;
   VectorGlyphFont vector_glyph_font_;
   std::string current_block_name_;
 };
@@ -1977,6 +2183,8 @@ ImportResult ImportDxfFile(CanvasState &state,
             .message =
                 "Failed to parse DXF with libdxfrw: " + file_path.string()};
   }
+
+  adapter.FinalizeGeometry();
 
   if (adapter.exceeded_3dface_limit()) {
     ImportResult result;

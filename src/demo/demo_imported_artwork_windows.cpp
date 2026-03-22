@@ -10,8 +10,6 @@ namespace demo {
 
 namespace {
 
-constexpr float kMinimumImportedArtworkScale = 0.01f;
-
 bool HasAnyDxfArtwork(const im2d::CanvasState &state) {
   return std::any_of(state.imported_artwork.begin(),
                      state.imported_artwork.end(),
@@ -20,48 +18,157 @@ bool HasAnyDxfArtwork(const im2d::CanvasState &state) {
                      });
 }
 
-bool IsScaleRatioLocked(const im2d::ImportedArtwork &artwork) {
-  return im2d::HasImportedArtworkFlag(artwork.flags,
-                                      im2d::ImportedArtworkFlagLockScaleRatio);
+void SelectImportedArtwork(im2d::CanvasState &state, int artwork_id) {
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Artwork,
+                                   artwork_id, 0};
 }
 
-void SetScaleRatioLocked(im2d::ImportedArtwork &artwork, bool locked) {
-  if (locked) {
-    artwork.flags |=
-        static_cast<uint32_t>(im2d::ImportedArtworkFlagLockScaleRatio);
+void SelectImportedGroup(im2d::CanvasState &state, int artwork_id,
+                         int group_id) {
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Group,
+                                   artwork_id, group_id};
+}
+
+void SelectImportedPath(im2d::CanvasState &state, int artwork_id, int path_id) {
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Path,
+                                   artwork_id, path_id};
+}
+
+bool IsSelectedImportedDebugItem(const im2d::CanvasState &state, int artwork_id,
+                                 im2d::ImportedDebugSelectionKind kind,
+                                 int item_id) {
+  return state.selected_imported_debug.artwork_id == artwork_id &&
+         state.selected_imported_debug.kind == kind &&
+         state.selected_imported_debug.item_id == item_id;
+}
+
+std::string ImportedPathSummary(const im2d::ImportedPath &path) {
+  std::string summary = path.label.empty() ? "Path" : path.label;
+  summary += " (" + std::to_string(path.segments.size()) + " seg";
+  if (path.segments.size() != 1) {
+    summary += 's';
+  }
+  summary += path.closed ? ", closed" : ", open";
+  if (im2d::HasImportedPathFlag(path.flags,
+                                im2d::ImportedPathFlagTextPlaceholder)) {
+    summary += ", text";
+  }
+  if (im2d::HasImportedPathFlag(path.flags, im2d::ImportedPathFlagFilledText)) {
+    summary += ", filled";
+  }
+  if (im2d::HasImportedPathFlag(path.flags,
+                                im2d::ImportedPathFlagHoleContour)) {
+    summary += ", hole";
+  }
+  summary += ')';
+  return summary;
+}
+
+void DrawImportedPathNode(im2d::CanvasState &state,
+                          const im2d::ImportedArtwork &artwork,
+                          const im2d::ImportedPath &path) {
+  const ImGuiTreeNodeFlags flags =
+      ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+      ImGuiTreeNodeFlags_SpanAvailWidth |
+      (IsSelectedImportedDebugItem(
+           state, artwork.id, im2d::ImportedDebugSelectionKind::Path, path.id)
+           ? ImGuiTreeNodeFlags_Selected
+           : 0);
+  ImGui::TreeNodeEx(reinterpret_cast<void *>(static_cast<intptr_t>(path.id)),
+                    flags, "%s", ImportedPathSummary(path).c_str());
+  if (ImGui::IsItemClicked()) {
+    SelectImportedPath(state, artwork.id, path.id);
+  }
+}
+
+void DrawImportedGroupNode(im2d::CanvasState &state,
+                           const im2d::ImportedArtwork &artwork,
+                           const im2d::ImportedGroup &group) {
+  std::string label = group.label.empty() ? "Group" : group.label;
+  label += " (" + std::to_string(group.path_ids.size()) + " paths, " +
+           std::to_string(group.child_group_ids.size()) + " groups)";
+  const ImGuiTreeNodeFlags flags =
+      ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+      (IsSelectedImportedDebugItem(
+           state, artwork.id, im2d::ImportedDebugSelectionKind::Group, group.id)
+           ? ImGuiTreeNodeFlags_Selected
+           : 0);
+  const bool open = ImGui::TreeNodeEx(
+      reinterpret_cast<void *>(static_cast<intptr_t>(group.id)), flags, "%s",
+      label.c_str());
+  if (ImGui::IsItemClicked()) {
+    SelectImportedGroup(state, artwork.id, group.id);
+  }
+  if (!open) {
     return;
   }
 
-  artwork.flags &=
-      ~static_cast<uint32_t>(im2d::ImportedArtworkFlagLockScaleRatio);
-}
-
-void UpdateArtworkScaleAxis(im2d::ImportedArtwork &artwork, int axis,
-                            float new_value) {
-  const float clamped_value = std::max(new_value, kMinimumImportedArtworkScale);
-  const bool lock_ratio = IsScaleRatioLocked(artwork);
-
-  if (!lock_ratio) {
-    if (axis == 0) {
-      artwork.scale.x = clamped_value;
-    } else {
-      artwork.scale.y = clamped_value;
+  for (const int child_group_id : group.child_group_ids) {
+    const im2d::ImportedGroup *child_group =
+        im2d::FindImportedGroup(artwork, child_group_id);
+    if (child_group != nullptr) {
+      DrawImportedGroupNode(state, artwork, *child_group);
     }
+  }
+
+  for (const int path_id : group.path_ids) {
+    const im2d::ImportedPath *path = im2d::FindImportedPath(artwork, path_id);
+    if (path != nullptr) {
+      DrawImportedPathNode(state, artwork, *path);
+    }
+  }
+
+  ImGui::TreePop();
+}
+
+void DrawImportedDebugTree(im2d::CanvasState &state,
+                           const im2d::ImportedArtwork &artwork) {
+  ImGui::Separator();
+  ImGui::TextUnformatted("Debug Tree");
+
+  const ImGuiTreeNodeFlags root_flags =
+      ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow |
+      ImGuiTreeNodeFlags_SpanAvailWidth |
+      (IsSelectedImportedDebugItem(state, artwork.id,
+                                   im2d::ImportedDebugSelectionKind::Artwork, 0)
+           ? ImGuiTreeNodeFlags_Selected
+           : 0);
+  const bool root_open = ImGui::TreeNodeEx(
+      reinterpret_cast<void *>(static_cast<intptr_t>(artwork.id * 100000)),
+      root_flags, "%s", artwork.name.c_str());
+  if (ImGui::IsItemClicked()) {
+    SelectImportedArtwork(state, artwork.id);
+  }
+  if (!root_open) {
     return;
   }
 
-  const float old_x = std::max(artwork.scale.x, kMinimumImportedArtworkScale);
-  const float old_y = std::max(artwork.scale.y, kMinimumImportedArtworkScale);
-  if (axis == 0) {
-    const float factor = clamped_value / old_x;
-    artwork.scale.x = clamped_value;
-    artwork.scale.y = std::max(old_y * factor, kMinimumImportedArtworkScale);
-    return;
+  const im2d::ImportedGroup *root_group =
+      im2d::FindImportedGroup(artwork, artwork.root_group_id);
+  if (root_group != nullptr) {
+    for (const int child_group_id : root_group->child_group_ids) {
+      const im2d::ImportedGroup *child_group =
+          im2d::FindImportedGroup(artwork, child_group_id);
+      if (child_group != nullptr) {
+        DrawImportedGroupNode(state, artwork, *child_group);
+      }
+    }
+    for (const int path_id : root_group->path_ids) {
+      const im2d::ImportedPath *path = im2d::FindImportedPath(artwork, path_id);
+      if (path != nullptr) {
+        DrawImportedPathNode(state, artwork, *path);
+      }
+    }
+  } else {
+    for (const im2d::ImportedPath &path : artwork.paths) {
+      DrawImportedPathNode(state, artwork, path);
+    }
   }
 
-  const float factor = clamped_value / old_y;
-  artwork.scale.y = clamped_value;
-  artwork.scale.x = std::max(old_x * factor, kMinimumImportedArtworkScale);
+  ImGui::TreePop();
 }
 
 } // namespace
@@ -89,7 +196,7 @@ void DrawImportedArtworkListWindow(im2d::CanvasState &state,
     const std::string label = artwork.name + " [" + artwork.source_format + "]";
     if (ImGui::Selectable(label.c_str(),
                           state.selected_imported_artwork_id == artwork.id)) {
-      state.selected_imported_artwork_id = artwork.id;
+      SelectImportedArtwork(state, artwork.id);
     }
     ImGui::PopID();
   }
@@ -106,6 +213,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   if (artwork == nullptr) {
     if (state.selected_imported_artwork_id != 0) {
       state.selected_imported_artwork_id = 0;
+      im2d::ClearImportedDebugSelection(state);
     }
     ImGui::TextUnformatted("Select an imported object to inspect it.");
     ImGui::End();
@@ -141,39 +249,42 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
     artwork->scale = ImVec2(1.0f, 1.0f);
   }
 
-  bool lock_scale_ratio = IsScaleRatioLocked(*artwork);
+  bool lock_scale_ratio = im2d::IsImportedArtworkScaleRatioLocked(*artwork);
   if (ImGui::Checkbox("Lock Scale Ratio", &lock_scale_ratio)) {
-    SetScaleRatioLocked(*artwork, lock_scale_ratio);
+    im2d::SetImportedArtworkScaleRatioLocked(*artwork, lock_scale_ratio);
   }
 
   float scale_x = artwork->scale.x;
   if (ImGui::InputFloat("Scale X", &scale_x, 0.0f, 0.0f, "%.3f")) {
-    UpdateArtworkScaleAxis(*artwork, 0, scale_x);
+    im2d::UpdateImportedArtworkScaleAxis(*artwork, 0, scale_x);
   }
 
   float scale_y = artwork->scale.y;
   if (ImGui::InputFloat("Scale Y", &scale_y, 0.0f, 0.0f, "%.3f")) {
-    UpdateArtworkScaleAxis(*artwork, 1, scale_y);
+    im2d::UpdateImportedArtworkScaleAxis(*artwork, 1, scale_y);
   }
 
   ImGui::DragFloat2("Adjust Position", &artwork->origin.x, 1.0f, 0.0f, 0.0f,
                     "%.2f");
   float drag_scale_x = artwork->scale.x;
-  if (ImGui::DragFloat("Adjust Scale X", &drag_scale_x, 0.01f,
-                       kMinimumImportedArtworkScale, 100.0f, "%.3f")) {
-    UpdateArtworkScaleAxis(*artwork, 0, drag_scale_x);
+  if (ImGui::DragFloat("Adjust Scale X", &drag_scale_x, 0.01f, 0.01f, 100.0f,
+                       "%.3f")) {
+    im2d::UpdateImportedArtworkScaleAxis(*artwork, 0, drag_scale_x);
   }
 
   float drag_scale_y = artwork->scale.y;
-  if (ImGui::DragFloat("Adjust Scale Y", &drag_scale_y, 0.01f,
-                       kMinimumImportedArtworkScale, 100.0f, "%.3f")) {
-    UpdateArtworkScaleAxis(*artwork, 1, drag_scale_y);
+  if (ImGui::DragFloat("Adjust Scale Y", &drag_scale_y, 0.01f, 0.01f, 100.0f,
+                       "%.3f")) {
+    im2d::UpdateImportedArtworkScaleAxis(*artwork, 1, drag_scale_y);
   }
 
   ImGui::Text("Bounds: %.1f x %.1f",
               artwork->bounds_max.x - artwork->bounds_min.x,
               artwork->bounds_max.y - artwork->bounds_min.y);
+  ImGui::Text("Groups: %d",
+              std::max(static_cast<int>(artwork->groups.size()) - 1, 0));
   ImGui::Text("Paths: %d", static_cast<int>(artwork->paths.size()));
+  DrawImportedDebugTree(state, *artwork);
   ImGui::Separator();
 
   if (ImGui::Button("Flip Horizontal")) {

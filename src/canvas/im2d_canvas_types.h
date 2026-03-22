@@ -155,7 +155,36 @@ constexpr bool HasImportedPathFlag(uint32_t flags, ImportedPathFlags flag) {
   return (flags & static_cast<uint32_t>(flag)) != 0;
 }
 
+enum class ImportedDebugSelectionKind {
+  None,
+  Artwork,
+  Group,
+  Path,
+};
+
+struct ImportedDebugSelection {
+  ImportedDebugSelectionKind kind = ImportedDebugSelectionKind::None;
+  int artwork_id = 0;
+  int item_id = 0;
+};
+
+struct ImportedGroup {
+  int id = 0;
+  int parent_group_id = 0;
+  std::string label;
+  std::string source_id;
+  ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
+  std::vector<int> child_group_ids;
+  std::vector<int> path_ids;
+};
+
 struct ImportedPath {
+  int id = 0;
+  int parent_group_id = 0;
+  std::string label;
+  ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
   std::vector<ImportedPathSegment> segments;
   ImVec4 stroke_color = ImVec4(0.92f, 0.94f, 0.97f, 1.0f);
   float stroke_width = 1.0f;
@@ -172,6 +201,10 @@ struct ImportedArtwork {
   ImVec2 bounds_min = ImVec2(0.0f, 0.0f);
   ImVec2 bounds_max = ImVec2(0.0f, 0.0f);
   ImVec2 scale = ImVec2(1.0f, 1.0f);
+  int root_group_id = 0;
+  int next_group_id = 1;
+  int next_path_id = 1;
+  std::vector<ImportedGroup> groups;
   std::vector<ImportedPath> paths;
   bool visible = true;
   uint32_t flags = kDefaultImportedArtworkFlags;
@@ -191,6 +224,7 @@ struct CanvasState {
   std::vector<ImportedArtwork> imported_artwork;
   bool show_imported_dxf_text = true;
   int selected_imported_artwork_id = 0;
+  ImportedDebugSelection selected_imported_debug;
   int next_guide_id = 1;
   int next_working_area_id = 1;
   int next_export_area_id = 1;

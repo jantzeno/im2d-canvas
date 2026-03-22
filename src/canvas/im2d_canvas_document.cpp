@@ -11,6 +11,8 @@ namespace im2d {
 
 namespace {
 
+constexpr float kMinimumImportedArtworkScale = 0.01f;
+
 template <typename Function>
 void ForEachImportedArtworkPoint(ImportedArtwork &artwork,
                                  Function &&function) {
@@ -32,30 +34,44 @@ struct ImportedArtworkBounds {
   bool valid = false;
 };
 
+void IncludePoint(ImportedArtworkBounds &bounds, const ImVec2 &point) {
+  if (!bounds.valid) {
+    bounds.min = point;
+    bounds.max = point;
+    bounds.valid = true;
+    return;
+  }
+
+  bounds.min.x = std::min(bounds.min.x, point.x);
+  bounds.min.y = std::min(bounds.min.y, point.y);
+  bounds.max.x = std::max(bounds.max.x, point.x);
+  bounds.max.y = std::max(bounds.max.y, point.y);
+}
+
+ImportedArtworkBounds ComputeImportedPathBounds(const ImportedPath &path) {
+  ImportedArtworkBounds bounds;
+  for (const ImportedPathSegment &segment : path.segments) {
+    IncludePoint(bounds, segment.start);
+    if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+      IncludePoint(bounds, segment.control1);
+      IncludePoint(bounds, segment.control2);
+    }
+    IncludePoint(bounds, segment.end);
+  }
+  return bounds;
+}
+
 ImportedArtworkBounds
 ComputeImportedArtworkBounds(const ImportedArtwork &artwork) {
   ImportedArtworkBounds bounds;
   for (const ImportedPath &path : artwork.paths) {
     for (const ImportedPathSegment &segment : path.segments) {
-      const auto include_point = [&bounds](const ImVec2 &point) {
-        if (!bounds.valid) {
-          bounds.min = point;
-          bounds.max = point;
-          bounds.valid = true;
-          return;
-        }
-        bounds.min.x = std::min(bounds.min.x, point.x);
-        bounds.min.y = std::min(bounds.min.y, point.y);
-        bounds.max.x = std::max(bounds.max.x, point.x);
-        bounds.max.y = std::max(bounds.max.y, point.y);
-      };
-
-      include_point(segment.start);
+      IncludePoint(bounds, segment.start);
       if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
-        include_point(segment.control1);
-        include_point(segment.control2);
+        IncludePoint(bounds, segment.control1);
+        IncludePoint(bounds, segment.control2);
       }
-      include_point(segment.end);
+      IncludePoint(bounds, segment.end);
     }
   }
 
@@ -71,6 +87,45 @@ ImVec2 ImportedArtworkScaledSize(const ImportedArtwork &artwork) {
   const ImVec2 local_size = ImportedArtworkLocalSize(artwork);
   return ImVec2(std::max(local_size.x * artwork.scale.x, 1.0f),
                 std::max(local_size.y * artwork.scale.y, 1.0f));
+}
+
+ImportedArtworkBounds ComputeImportedGroupBounds(const ImportedArtwork &artwork,
+                                                 const ImportedGroup &group) {
+  ImportedArtworkBounds bounds;
+
+  for (const int path_id : group.path_ids) {
+    const ImportedPath *path = FindImportedPath(artwork, path_id);
+    if (path == nullptr) {
+      continue;
+    }
+
+    const ImportedArtworkBounds path_bounds = ComputeImportedPathBounds(*path);
+    if (!path_bounds.valid) {
+      continue;
+    }
+
+    IncludePoint(bounds, path_bounds.min);
+    IncludePoint(bounds, path_bounds.max);
+  }
+
+  for (const int child_group_id : group.child_group_ids) {
+    const ImportedGroup *child_group =
+        FindImportedGroup(artwork, child_group_id);
+    if (child_group == nullptr) {
+      continue;
+    }
+
+    const ImportedArtworkBounds child_bounds =
+        ComputeImportedGroupBounds(artwork, *child_group);
+    if (!child_bounds.valid) {
+      continue;
+    }
+
+    IncludePoint(bounds, child_bounds.min);
+    IncludePoint(bounds, child_bounds.max);
+  }
+
+  return bounds;
 }
 
 template <typename Function>
@@ -93,6 +148,7 @@ bool TransformImportedArtwork(CanvasState &state, int imported_artwork_id,
   });
 
   RecomputeImportedArtworkBounds(*artwork);
+  RecomputeImportedHierarchyBounds(*artwork);
   const ImVec2 new_scaled_size = ImportedArtworkScaledSize(*artwork);
   artwork->origin = ImVec2(world_center.x - new_scaled_size.x * 0.5f,
                            world_center.y - new_scaled_size.y * 0.5f);
@@ -113,6 +169,100 @@ ExportArea *FindExportAreaBySourceWorkingAreaId(CanvasState &state,
 }
 
 } // namespace
+
+ImVec2 ImportedArtworkPointToWorld(const ImportedArtwork &artwork,
+                                   const ImVec2 &point) {
+  return ImVec2(
+      artwork.origin.x + (point.x - artwork.bounds_min.x) * artwork.scale.x,
+      artwork.origin.y + (point.y - artwork.bounds_min.y) * artwork.scale.y);
+}
+
+void ImportedLocalBoundsToWorldBounds(const ImportedArtwork &artwork,
+                                      const ImVec2 &local_min,
+                                      const ImVec2 &local_max,
+                                      ImVec2 *world_min, ImVec2 *world_max) {
+  const ImVec2 world_min_value =
+      ImportedArtworkPointToWorld(artwork, local_min);
+  const ImVec2 world_max_value =
+      ImportedArtworkPointToWorld(artwork, local_max);
+  if (world_min != nullptr) {
+    *world_min = ImVec2(std::min(world_min_value.x, world_max_value.x),
+                        std::min(world_min_value.y, world_max_value.y));
+  }
+  if (world_max != nullptr) {
+    *world_max = ImVec2(std::max(world_min_value.x, world_max_value.x),
+                        std::max(world_min_value.y, world_max_value.y));
+  }
+}
+
+void ClearImportedDebugSelection(CanvasState &state) {
+  state.selected_imported_debug = {};
+}
+
+bool IsImportedArtworkScaleRatioLocked(const ImportedArtwork &artwork) {
+  return HasImportedArtworkFlag(artwork.flags,
+                                ImportedArtworkFlagLockScaleRatio);
+}
+
+void SetImportedArtworkScaleRatioLocked(ImportedArtwork &artwork, bool locked) {
+  if (locked) {
+    artwork.flags |= static_cast<uint32_t>(ImportedArtworkFlagLockScaleRatio);
+    return;
+  }
+
+  artwork.flags &= ~static_cast<uint32_t>(ImportedArtworkFlagLockScaleRatio);
+}
+
+void UpdateImportedArtworkScaleAxis(ImportedArtwork &artwork, int axis,
+                                    float new_value) {
+  const float clamped_value = std::max(new_value, kMinimumImportedArtworkScale);
+  const bool lock_ratio = IsImportedArtworkScaleRatioLocked(artwork);
+
+  if (!lock_ratio) {
+    if (axis == 0) {
+      artwork.scale.x = clamped_value;
+    } else {
+      artwork.scale.y = clamped_value;
+    }
+    return;
+  }
+
+  const float old_x = std::max(artwork.scale.x, kMinimumImportedArtworkScale);
+  const float old_y = std::max(artwork.scale.y, kMinimumImportedArtworkScale);
+  if (axis == 0) {
+    const float factor = clamped_value / old_x;
+    artwork.scale.x = clamped_value;
+    artwork.scale.y = std::max(old_y * factor, kMinimumImportedArtworkScale);
+    return;
+  }
+
+  const float factor = clamped_value / old_y;
+  artwork.scale.y = clamped_value;
+  artwork.scale.x = std::max(old_x * factor, kMinimumImportedArtworkScale);
+}
+
+void UpdateImportedArtworkScaleFromTarget(ImportedArtwork &artwork,
+                                          const ImVec2 &target_scale) {
+  const ImVec2 clamped_scale(
+      std::max(target_scale.x, kMinimumImportedArtworkScale),
+      std::max(target_scale.y, kMinimumImportedArtworkScale));
+  if (!IsImportedArtworkScaleRatioLocked(artwork)) {
+    artwork.scale = clamped_scale;
+    return;
+  }
+
+  const float old_x = std::max(artwork.scale.x, kMinimumImportedArtworkScale);
+  const float old_y = std::max(artwork.scale.y, kMinimumImportedArtworkScale);
+  const float factor_x = clamped_scale.x / old_x;
+  const float factor_y = clamped_scale.y / old_y;
+  const float chosen_factor =
+      std::abs(factor_x - 1.0f) >= std::abs(factor_y - 1.0f) ? factor_x
+                                                             : factor_y;
+  artwork.scale.x =
+      std::max(old_x * chosen_factor, kMinimumImportedArtworkScale);
+  artwork.scale.y =
+      std::max(old_y * chosen_factor, kMinimumImportedArtworkScale);
+}
 
 Guide *FindGuide(CanvasState &state, int guide_id) {
   auto it = std::find_if(
@@ -146,6 +296,36 @@ const ImportedArtwork *FindImportedArtwork(const CanvasState &state,
                      return artwork.id == imported_artwork_id;
                    });
   return it == state.imported_artwork.end() ? nullptr : &(*it);
+}
+
+ImportedGroup *FindImportedGroup(ImportedArtwork &artwork, int group_id) {
+  auto it = std::find_if(
+      artwork.groups.begin(), artwork.groups.end(),
+      [group_id](const ImportedGroup &group) { return group.id == group_id; });
+  return it == artwork.groups.end() ? nullptr : &(*it);
+}
+
+const ImportedGroup *FindImportedGroup(const ImportedArtwork &artwork,
+                                       int group_id) {
+  auto it = std::find_if(
+      artwork.groups.begin(), artwork.groups.end(),
+      [group_id](const ImportedGroup &group) { return group.id == group_id; });
+  return it == artwork.groups.end() ? nullptr : &(*it);
+}
+
+ImportedPath *FindImportedPath(ImportedArtwork &artwork, int path_id) {
+  auto it = std::find_if(
+      artwork.paths.begin(), artwork.paths.end(),
+      [path_id](const ImportedPath &path) { return path.id == path_id; });
+  return it == artwork.paths.end() ? nullptr : &(*it);
+}
+
+const ImportedPath *FindImportedPath(const ImportedArtwork &artwork,
+                                     int path_id) {
+  auto it = std::find_if(
+      artwork.paths.begin(), artwork.paths.end(),
+      [path_id](const ImportedPath &path) { return path.id == path_id; });
+  return it == artwork.paths.end() ? nullptr : &(*it);
 }
 
 WorkingArea *FindWorkingArea(CanvasState &state, int working_area_id) {
@@ -214,6 +394,8 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
     artwork.origin.y += state.working_areas.front().origin.y + stagger;
   }
 
+  RecomputeImportedHierarchyBounds(artwork);
+
   state.imported_artwork.push_back(std::move(artwork));
   return state.imported_artwork.back().id;
 }
@@ -221,6 +403,7 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
 void ClearImportedArtwork(CanvasState &state) {
   state.imported_artwork.clear();
   state.selected_imported_artwork_id = 0;
+  ClearImportedDebugSelection(state);
 }
 
 void RecomputeImportedArtworkBounds(ImportedArtwork &artwork) {
@@ -240,6 +423,31 @@ void RecomputeImportedArtworkBounds(ImportedArtwork &artwork) {
   artwork.bounds_min = ImVec2(0.0f, 0.0f);
   artwork.bounds_max = ImVec2(std::max(bounds.max.x - bounds.min.x, 1.0f),
                               std::max(bounds.max.y - bounds.min.y, 1.0f));
+}
+
+void RecomputeImportedHierarchyBounds(ImportedArtwork &artwork) {
+  for (ImportedPath &path : artwork.paths) {
+    const ImportedArtworkBounds path_bounds = ComputeImportedPathBounds(path);
+    if (path_bounds.valid) {
+      path.bounds_min = path_bounds.min;
+      path.bounds_max = path_bounds.max;
+    } else {
+      path.bounds_min = ImVec2(0.0f, 0.0f);
+      path.bounds_max = ImVec2(0.0f, 0.0f);
+    }
+  }
+
+  for (ImportedGroup &group : artwork.groups) {
+    const ImportedArtworkBounds group_bounds =
+        ComputeImportedGroupBounds(artwork, group);
+    if (group_bounds.valid) {
+      group.bounds_min = group_bounds.min;
+      group.bounds_max = group_bounds.max;
+    } else {
+      group.bounds_min = ImVec2(0.0f, 0.0f);
+      group.bounds_max = ImVec2(0.0f, 0.0f);
+    }
+  }
 }
 
 bool FlipImportedArtworkHorizontal(CanvasState &state,
@@ -300,6 +508,9 @@ bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id) {
   state.imported_artwork.erase(it);
   if (state.selected_imported_artwork_id == imported_artwork_id) {
     state.selected_imported_artwork_id = 0;
+  }
+  if (state.selected_imported_debug.artwork_id == imported_artwork_id) {
+    ClearImportedDebugSelection(state);
   }
   return true;
 }

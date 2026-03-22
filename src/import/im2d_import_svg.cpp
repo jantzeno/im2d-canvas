@@ -9,6 +9,7 @@
 #include <cstring>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 #define NANOSVG_ALL_COLOR_KEYWORDS
 #define NANOSVG_IMPLEMENTATION
@@ -25,6 +26,137 @@ struct SvgBuildDiagnostics {
   int imported_paths = 0;
   bool used_image_bounds_fallback = false;
 };
+
+struct SvgHierarchyContext {
+  std::unordered_map<std::string, int> source_to_group_id;
+  std::vector<int> ordered_leaf_group_ids;
+};
+
+int AddImportedGroup(ImportedArtwork &artwork, int parent_group_id,
+                     std::string label, std::string source_id) {
+  ImportedGroup group;
+  group.id = artwork.next_group_id++;
+  group.parent_group_id = parent_group_id;
+  group.label = std::move(label);
+  group.source_id = std::move(source_id);
+  artwork.groups.push_back(std::move(group));
+
+  if (ImportedGroup *parent = FindImportedGroup(artwork, parent_group_id);
+      parent != nullptr) {
+    parent->child_group_ids.push_back(artwork.groups.back().id);
+  }
+
+  return artwork.groups.back().id;
+}
+
+std::vector<lunasvg::Element>
+GetChildElements(const lunasvg::Element &element) {
+  std::vector<lunasvg::Element> children;
+  for (const lunasvg::Node &child : element.children()) {
+    if (!child.isElement()) {
+      continue;
+    }
+    children.push_back(child.toElement());
+  }
+  return children;
+}
+
+std::string ResolveElementLabel(const lunasvg::Element &element,
+                                const std::string &fallback) {
+  const std::string custom_label = element.getAttribute("data-im2d-label");
+  if (!custom_label.empty()) {
+    return custom_label;
+  }
+
+  const std::string source_id = element.getAttribute("id");
+  if (!source_id.empty()) {
+    return source_id;
+  }
+
+  return fallback;
+}
+
+void BuildSvgHierarchy(ImportedArtwork &artwork,
+                       const lunasvg::Element &element, int parent_group_id,
+                       SvgHierarchyContext &context,
+                       int *next_group_label_index,
+                       bool skip_group_for_element = false) {
+  const std::vector<lunasvg::Element> children = GetChildElements(element);
+  const std::string source_id = element.getAttribute("id");
+
+  if (children.empty()) {
+    context.ordered_leaf_group_ids.push_back(parent_group_id);
+    if (!source_id.empty()) {
+      context.source_to_group_id[source_id] = parent_group_id;
+    }
+    return;
+  }
+
+  int owner_group_id = parent_group_id;
+  if (!skip_group_for_element) {
+    owner_group_id = AddImportedGroup(
+        artwork, parent_group_id,
+        ResolveElementLabel(
+            element, "Group " + std::to_string((*next_group_label_index)++)),
+        source_id);
+    if (!source_id.empty()) {
+      context.source_to_group_id[source_id] = owner_group_id;
+    }
+  } else if (!source_id.empty()) {
+    context.source_to_group_id[source_id] = owner_group_id;
+  }
+
+  for (const lunasvg::Element &child : children) {
+    BuildSvgHierarchy(artwork, child, owner_group_id, context,
+                      next_group_label_index, false);
+  }
+}
+
+int ResolveShapeGroupId(const ImportedArtwork &artwork,
+                        const lunasvg::Document &document,
+                        const SvgHierarchyContext &context,
+                        const NSVGshape &shape, int fallback_group_id,
+                        size_t shape_index) {
+  if (shape_index < context.ordered_leaf_group_ids.size()) {
+    fallback_group_id = context.ordered_leaf_group_ids[shape_index];
+  }
+
+  if (shape.id[0] == '\0') {
+    return fallback_group_id;
+  }
+
+  const std::string source_id(shape.id);
+  auto direct_match = context.source_to_group_id.find(source_id);
+  if (direct_match != context.source_to_group_id.end()) {
+    return direct_match->second;
+  }
+
+  for (lunasvg::Element current = document.getElementById(source_id); current;
+       current = current.parentElement()) {
+    const std::string current_id = current.getAttribute("id");
+    if (current_id.empty()) {
+      continue;
+    }
+
+    auto it = context.source_to_group_id.find(current_id);
+    if (it != context.source_to_group_id.end()) {
+      return it->second;
+    }
+  }
+
+  return fallback_group_id;
+}
+
+std::string ResolveShapeLabel(const NSVGshape &shape, int shape_index,
+                              int part_index, int total_parts) {
+  std::string label = shape.id[0] != '\0'
+                          ? std::string(shape.id)
+                          : "Path " + std::to_string(shape_index + 1);
+  if (total_parts > 1) {
+    label += " / Part " + std::to_string(part_index + 1);
+  }
+  return label;
+}
 
 bool MatchesRgbColor(unsigned int color, unsigned int expected_color) {
   return (color & 0x00ffffffu) == (expected_color & 0x00ffffffu);
@@ -109,6 +241,15 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
   const float offset_y = -min_y;
   artwork.bounds_min = ImVec2(0.0f, 0.0f);
   artwork.bounds_max = ImVec2(width, height);
+  artwork.root_group_id =
+      AddImportedGroup(artwork, 0, "Document", std::string{});
+
+  SvgHierarchyContext hierarchy_context;
+  int next_group_label_index = 1;
+  BuildSvgHierarchy(artwork, document.documentElement(), artwork.root_group_id,
+                    hierarchy_context, &next_group_label_index, true);
+
+  size_t visible_shape_index = 0;
 
   for (const NSVGshape *shape = image.shapes; shape != nullptr;
        shape = shape->next) {
@@ -116,6 +257,18 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
       diagnostics->hidden_shapes += 1;
       continue;
     }
+
+    const int parent_group_id =
+        ResolveShapeGroupId(artwork, document, hierarchy_context, *shape,
+                            artwork.root_group_id, visible_shape_index);
+    int total_path_parts = 0;
+    for (const NSVGpath *path = shape->paths; path != nullptr;
+         path = path->next) {
+      if (path->npts >= 4) {
+        total_path_parts += 1;
+      }
+    }
+    int part_index = 0;
 
     const bool is_text_placeholder = IsTextPlaceholderShape(*shape, options);
     const bool is_filled_text = IsFilledTextShape(*shape, options);
@@ -129,6 +282,11 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
       }
 
       ImportedPath imported_path;
+      imported_path.id = artwork.next_path_id++;
+      imported_path.parent_group_id = parent_group_id;
+      imported_path.label =
+          ResolveShapeLabel(*shape, static_cast<int>(visible_shape_index),
+                            part_index, total_path_parts);
       imported_path.stroke_color = ResolveStrokeColor(*shape);
       imported_path.stroke_width =
           shape->strokeWidth > 0.0f ? shape->strokeWidth : 1.0f;
@@ -160,13 +318,22 @@ ImportedArtwork BuildArtworkFromSvg(const std::string &display_name,
       }
 
       if (!imported_path.segments.empty()) {
+        if (ImportedGroup *group = FindImportedGroup(artwork, parent_group_id);
+            group != nullptr) {
+          group->path_ids.push_back(imported_path.id);
+        }
         artwork.paths.push_back(std::move(imported_path));
         diagnostics->imported_paths += 1;
+        part_index += 1;
       } else {
         diagnostics->skipped_paths += 1;
       }
     }
+
+    visible_shape_index += 1;
   }
+
+  RecomputeImportedHierarchyBounds(artwork);
 
   return artwork;
 }
