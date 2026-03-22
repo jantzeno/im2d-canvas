@@ -169,6 +169,35 @@ struct ImportedDebugSelection {
   int item_id = 0;
 };
 
+enum class ImportedElementKind {
+  Path,
+  DxfText,
+};
+
+enum class ImportedArtworkEditMode {
+  None,
+  SelectRectangle,
+  SelectOval,
+};
+
+struct ImportedElementSelection {
+  ImportedElementKind kind = ImportedElementKind::Path;
+  int item_id = 0;
+};
+
+struct ImportedArtworkOperationResult {
+  bool success = false;
+  int artwork_id = 0;
+  int created_artwork_id = 0;
+  int selected_count = 0;
+  int moved_count = 0;
+  int skipped_count = 0;
+  int stitched_count = 0;
+  int closed_count = 0;
+  int open_count = 0;
+  std::string message;
+};
+
 struct ImportedGroup {
   int id = 0;
   int parent_group_id = 0;
@@ -297,6 +326,10 @@ struct CanvasState {
   bool show_imported_dxf_text = true;
   int selected_imported_artwork_id = 0;
   ImportedDebugSelection selected_imported_debug;
+  ImportedArtworkEditMode imported_artwork_edit_mode =
+      ImportedArtworkEditMode::None;
+  std::vector<ImportedElementSelection> selected_imported_elements;
+  ImportedArtworkOperationResult last_imported_artwork_operation;
   int next_guide_id = 1;
   int next_working_area_id = 1;
   int next_export_area_id = 1;

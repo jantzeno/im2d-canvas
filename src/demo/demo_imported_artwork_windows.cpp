@@ -22,6 +22,7 @@ void SelectImportedArtwork(im2d::CanvasState &state, int artwork_id) {
   state.selected_imported_artwork_id = artwork_id;
   state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Artwork,
                                    artwork_id, 0};
+  im2d::ClearSelectedImportedElements(state);
 }
 
 void SelectImportedGroup(im2d::CanvasState &state, int artwork_id,
@@ -29,12 +30,15 @@ void SelectImportedGroup(im2d::CanvasState &state, int artwork_id,
   state.selected_imported_artwork_id = artwork_id;
   state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Group,
                                    artwork_id, group_id};
+  im2d::ClearSelectedImportedElements(state);
 }
 
 void SelectImportedPath(im2d::CanvasState &state, int artwork_id, int path_id) {
   state.selected_imported_artwork_id = artwork_id;
   state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Path,
                                    artwork_id, path_id};
+  state.selected_imported_elements = {
+      {im2d::ImportedElementKind::Path, path_id}};
 }
 
 void SelectImportedDxfText(im2d::CanvasState &state, int artwork_id,
@@ -42,6 +46,8 @@ void SelectImportedDxfText(im2d::CanvasState &state, int artwork_id,
   state.selected_imported_artwork_id = artwork_id;
   state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::DxfText,
                                    artwork_id, text_id};
+  state.selected_imported_elements = {
+      {im2d::ImportedElementKind::DxfText, text_id}};
 }
 
 bool IsSelectedImportedDebugItem(const im2d::CanvasState &state, int artwork_id,
@@ -272,6 +278,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
     if (state.selected_imported_artwork_id != 0) {
       state.selected_imported_artwork_id = 0;
       im2d::ClearImportedDebugSelection(state);
+      im2d::ClearSelectedImportedElements(state);
     }
     ImGui::TextUnformatted("Select an imported object to inspect it.");
     ImGui::End();
@@ -343,8 +350,82 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
               std::max(static_cast<int>(artwork->groups.size()) - 1, 0));
   ImGui::Text("Paths: %d", static_cast<int>(artwork->paths.size()));
   ImGui::Text("DXF Text: %d", static_cast<int>(artwork->dxf_text.size()));
+  ImGui::Text("Selected Elements: %d",
+              static_cast<int>(state.selected_imported_elements.size()));
+  ImGui::Separator();
+
+  ImGui::TextUnformatted("Edit Mode");
+  if (ImGui::RadioButton("None", state.imported_artwork_edit_mode ==
+                                     im2d::ImportedArtworkEditMode::None)) {
+    state.imported_artwork_edit_mode = im2d::ImportedArtworkEditMode::None;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("Rect Marquee",
+                         state.imported_artwork_edit_mode ==
+                             im2d::ImportedArtworkEditMode::SelectRectangle)) {
+    state.imported_artwork_edit_mode =
+        im2d::ImportedArtworkEditMode::SelectRectangle;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("Oval Marquee",
+                         state.imported_artwork_edit_mode ==
+                             im2d::ImportedArtworkEditMode::SelectOval)) {
+    state.imported_artwork_edit_mode =
+        im2d::ImportedArtworkEditMode::SelectOval;
+  }
+
+  ImVec4 outline_color =
+      !artwork->paths.empty()
+          ? artwork->paths.front().stroke_color
+          : (!artwork->dxf_text.empty() ? artwork->dxf_text.front().stroke_color
+                                        : ImVec4(0.92f, 0.94f, 0.97f, 1.0f));
+  if (ImGui::ColorEdit4("Outline Color", &outline_color.x,
+                        ImGuiColorEditFlags_Float)) {
+    im2d::UpdateImportedArtworkOutlineColor(state, artwork->id, outline_color);
+  }
+
   DrawImportedDebugTree(state, *artwork);
   ImGui::Separator();
+
+  if (ImGui::Button("Prepare For Cutting")) {
+    im2d::PrepareImportedArtworkForCutting(state, artwork->id);
+  }
+  ImGui::SameLine();
+  const bool has_selected_elements = !state.selected_imported_elements.empty();
+  if (!has_selected_elements) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Extract Selection")) {
+    im2d::ExtractSelectedImportedElements(state, artwork->id);
+  }
+  if (!has_selected_elements) {
+    ImGui::EndDisabled();
+  }
+
+  const im2d::ImportedArtworkOperationResult &operation =
+      state.last_imported_artwork_operation;
+  if (!operation.message.empty()) {
+    ImGui::Separator();
+    ImGui::TextWrapped("%s", operation.message.c_str());
+    if (operation.artwork_id == artwork->id ||
+        operation.created_artwork_id == artwork->id) {
+      if (operation.selected_count > 0) {
+        ImGui::Text("Selected: %d", operation.selected_count);
+      }
+      if (operation.moved_count > 0) {
+        ImGui::Text("Moved: %d", operation.moved_count);
+      }
+      if (operation.skipped_count > 0) {
+        ImGui::Text("Skipped: %d", operation.skipped_count);
+      }
+      if (operation.stitched_count > 0 || operation.closed_count > 0 ||
+          operation.open_count > 0) {
+        ImGui::Text("Stitched: %d", operation.stitched_count);
+        ImGui::Text("Closed: %d", operation.closed_count);
+        ImGui::Text("Open: %d", operation.open_count);
+      }
+    }
+  }
 
   if (ImGui::Button("Flip Horizontal")) {
     im2d::FlipImportedArtworkHorizontal(state, artwork->id);

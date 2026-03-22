@@ -40,6 +40,7 @@ struct ImportedArtworkHit {
 
 struct TransientCanvasState {
   bool creating_guide = false;
+  bool marquee_selecting = false;
   GuideOrientation pending_orientation = GuideOrientation::Vertical;
   float pending_position = 0.0f;
   int dragging_guide_id = 0;
@@ -53,6 +54,8 @@ struct TransientCanvasState {
   int resizing_working_area_id = 0;
   ImVec2 imported_artwork_drag_offset = ImVec2(0.0f, 0.0f);
   ImVec2 working_area_drag_offset = ImVec2(0.0f, 0.0f);
+  ImVec2 marquee_start_world = ImVec2(0.0f, 0.0f);
+  ImVec2 marquee_end_world = ImVec2(0.0f, 0.0f);
 };
 
 TransientCanvasState &GetTransientCanvasState() {
@@ -109,6 +112,18 @@ ImRect WorldRectToScreenRect(const CanvasState &state, const ImVec2 &canvas_min,
   const ImVec2 max = WorldToScreen(state, canvas_min, world_rect.Max);
   return ImRect(ImVec2(std::min(min.x, max.x), std::min(min.y, max.y)),
                 ImVec2(std::max(min.x, max.x), std::max(min.y, max.y)));
+}
+
+ImRect ImportedElementScreenRect(const CanvasState &state,
+                                 const ImVec2 &canvas_min,
+                                 const ImportedArtwork &artwork,
+                                 const ImVec2 &bounds_min,
+                                 const ImVec2 &bounds_max) {
+  ImVec2 world_min;
+  ImVec2 world_max;
+  ImportedLocalBoundsToWorldBounds(artwork, bounds_min, bounds_max, &world_min,
+                                   &world_max);
+  return WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
 }
 
 bool TryGetImportedDebugScreenRect(const CanvasState &state,
@@ -676,6 +691,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
 
   const ImU32 selected_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_selected);
+  const ImU32 element_selection_color =
+      ImGui::ColorConvertFloat4ToU32(state.theme.guide_hovered);
 
   for (const ImportedArtwork &artwork : state.imported_artwork) {
     if (!artwork.visible) {
@@ -688,6 +705,13 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
         continue;
       }
       DrawImportedDxfText(draw_list, state, canvas_rect, artwork, text);
+      if (IsImportedElementSelected(state, artwork.id,
+                                    ImportedElementKind::DxfText, text.id)) {
+        const ImRect text_rect = ImportedElementScreenRect(
+            state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
+        draw_list->AddRect(text_rect.Min, text_rect.Max,
+                           element_selection_color, 3.0f, 0, 2.0f);
+      }
     }
 
     for (const ImportedPath &path : artwork.paths) {
@@ -750,11 +774,19 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
       }
       if (is_hole_contour && path.closed) {
         draw_list->PathFillConcave(background_color);
-        continue;
+      } else {
+        draw_list->PathStroke(packed_color, path.closed,
+                              is_filled_text ? std::max(1.0f, thickness * 0.35f)
+                                             : thickness);
       }
-      draw_list->PathStroke(packed_color, path.closed,
-                            is_filled_text ? std::max(1.0f, thickness * 0.35f)
-                                           : thickness);
+
+      if (IsImportedElementSelected(state, artwork.id,
+                                    ImportedElementKind::Path, path.id)) {
+        const ImRect path_rect = ImportedElementScreenRect(
+            state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
+        draw_list->AddRect(path_rect.Min, path_rect.Max,
+                           element_selection_color, 3.0f, 0, 2.0f);
+      }
     }
 
     ImRect screen_rect;
@@ -781,6 +813,48 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
   }
 
   draw_list->PopClipRect();
+}
+
+void DrawImportedMarquee(ImDrawList *draw_list, const CanvasState &state,
+                         const ImRect &canvas_rect,
+                         const TransientCanvasState &transient_state) {
+  if (!transient_state.marquee_selecting) {
+    return;
+  }
+
+  const ImRect marquee_world_rect(
+      ImVec2(std::min(transient_state.marquee_start_world.x,
+                      transient_state.marquee_end_world.x),
+             std::min(transient_state.marquee_start_world.y,
+                      transient_state.marquee_end_world.y)),
+      ImVec2(std::max(transient_state.marquee_start_world.x,
+                      transient_state.marquee_end_world.x),
+             std::max(transient_state.marquee_start_world.y,
+                      transient_state.marquee_end_world.y)));
+  const ImRect marquee_screen_rect =
+      WorldRectToScreenRect(state, canvas_rect.Min, marquee_world_rect);
+  const ImU32 outline_color =
+      ImGui::ColorConvertFloat4ToU32(state.theme.guide_hovered);
+  const ImU32 fill_color = ImGui::ColorConvertFloat4ToU32(
+      ImVec4(state.theme.guide_hovered.x, state.theme.guide_hovered.y,
+             state.theme.guide_hovered.z, 0.18f));
+
+  if (state.imported_artwork_edit_mode == ImportedArtworkEditMode::SelectOval) {
+    const ImVec2 center(
+        (marquee_screen_rect.Min.x + marquee_screen_rect.Max.x) * 0.5f,
+        (marquee_screen_rect.Min.y + marquee_screen_rect.Max.y) * 0.5f);
+    const ImVec2 radius(
+        (marquee_screen_rect.Max.x - marquee_screen_rect.Min.x) * 0.5f,
+        (marquee_screen_rect.Max.y - marquee_screen_rect.Min.y) * 0.5f);
+    draw_list->AddEllipseFilled(center, radius, fill_color);
+    draw_list->AddEllipse(center, radius, outline_color, 0, 2.0f);
+    return;
+  }
+
+  draw_list->AddRectFilled(marquee_screen_rect.Min, marquee_screen_rect.Max,
+                           fill_color, 3.0f);
+  draw_list->AddRect(marquee_screen_rect.Min, marquee_screen_rect.Max,
+                     outline_color, 3.0f, 0, 2.0f);
 }
 
 void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
@@ -1040,6 +1114,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   const WorkingAreaHit area_hit =
       FindHoveredWorkingArea(state, canvas_rect.Min, canvas_rect, io.MousePos,
                              options.resize_handle_size);
+  const bool marquee_mode_active =
+      state.imported_artwork_edit_mode != ImportedArtworkEditMode::None &&
+      state.selected_imported_artwork_id != 0;
 
   int hovered_guide_id = 0;
   if (canvas_hovered && !transient_state.creating_guide) {
@@ -1092,7 +1169,17 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
 
   if (!transient_state.creating_guide && canvas_hovered &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-    if (hovered_guide_id != 0) {
+    if (marquee_mode_active) {
+      transient_state.marquee_selecting = true;
+      transient_state.marquee_start_world =
+          ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+      transient_state.marquee_end_world = transient_state.marquee_start_world;
+      transient_state.dragging_guide_id = 0;
+      transient_state.dragging_imported_artwork_id = 0;
+      transient_state.resizing_imported_artwork_id = 0;
+      transient_state.dragging_working_area_id = 0;
+      transient_state.resizing_working_area_id = 0;
+    } else if (hovered_guide_id != 0) {
       if (Guide *guide = FindGuide(state, hovered_guide_id);
           guide != nullptr && !guide->locked) {
         transient_state.dragging_guide_id = hovered_guide_id;
@@ -1101,6 +1188,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       state.selected_imported_artwork_id = imported_artwork_hit.id;
       state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                        imported_artwork_hit.id, 0};
+      ClearSelectedImportedElements(state);
       transient_state.selected_working_area_id = 0;
       if (ImportedArtwork *artwork =
               FindImportedArtwork(state, imported_artwork_hit.id);
@@ -1126,6 +1214,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       transient_state.selected_working_area_id = area_hit.id;
       state.selected_imported_artwork_id = 0;
       ClearImportedDebugSelection(state);
+      ClearSelectedImportedElements(state);
       if (WorkingArea *area = FindWorkingArea(state, area_hit.id);
           area != nullptr) {
         const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
@@ -1143,6 +1232,20 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       state.selected_imported_artwork_id = 0;
       transient_state.selected_working_area_id = 0;
       ClearImportedDebugSelection(state);
+      ClearSelectedImportedElements(state);
+    }
+  }
+
+  if (transient_state.marquee_selecting) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      transient_state.marquee_end_world =
+          ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+    } else {
+      SelectImportedElementsInWorldRect(
+          state, state.selected_imported_artwork_id,
+          transient_state.marquee_start_world,
+          transient_state.marquee_end_world, state.imported_artwork_edit_mode);
+      transient_state.marquee_selecting = false;
     }
   }
 
@@ -1281,6 +1384,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   DrawImportedArtwork(draw_list, state, canvas_rect,
                       state.selected_imported_artwork_id, options);
   DrawGuides(draw_list, state, canvas_rect, hovered_guide_id, transient_state);
+  DrawImportedMarquee(draw_list, state, canvas_rect, transient_state);
   DrawRulerAxis(draw_list, state, top_ruler_rect, true);
   DrawRulerAxis(draw_list, state, left_ruler_rect, false);
   draw_list->AddLine(ImVec2(canvas_rect.Min.x, total_rect.Min.y),
@@ -1311,6 +1415,16 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     if (ImportedArtwork *artwork = FindImportedArtwork(
             state, transient_state.context_imported_artwork_id);
         artwork != nullptr) {
+      if (ImGui::MenuItem("Prepare For Cutting")) {
+        PrepareImportedArtworkForCutting(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (!state.selected_imported_elements.empty() &&
+          ImGui::MenuItem("Extract Selected Elements")) {
+        ExtractSelectedImportedElements(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::Separator();
       if (ImGui::MenuItem("Flip Horizontal")) {
         FlipImportedArtworkHorizontal(state, artwork->id);
         ImGui::CloseCurrentPopup();
@@ -1344,6 +1458,15 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   if (ImGui::BeginPopup("guide_context_menu")) {
     if (Guide *guide = FindGuide(state, transient_state.context_guide_id);
         guide != nullptr) {
+      if (state.selected_imported_artwork_id != 0 &&
+          ImGui::MenuItem("Split Selected Artwork At Guide")) {
+        SeparateImportedArtworkByGuide(
+            state, state.selected_imported_artwork_id, guide->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (state.selected_imported_artwork_id != 0) {
+        ImGui::Separator();
+      }
       if (ImGui::MenuItem(guide->locked ? "Unlock guide" : "Lock guide")) {
         guide->locked = !guide->locked;
       }

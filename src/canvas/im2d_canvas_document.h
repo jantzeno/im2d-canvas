@@ -10,6 +10,9 @@ int AddWorkingArea(CanvasState &state,
 int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork);
 void ClearImportedArtwork(CanvasState &state);
 void ClearImportedDebugSelection(CanvasState &state);
+void ClearSelectedImportedElements(CanvasState &state);
+bool IsImportedElementSelected(const CanvasState &state, int artwork_id,
+                               ImportedElementKind kind, int item_id);
 void RecomputeImportedArtworkBounds(ImportedArtwork &artwork);
 void RecomputeImportedHierarchyBounds(ImportedArtwork &artwork);
 bool IsImportedArtworkScaleRatioLocked(const ImportedArtwork &artwork);
@@ -24,6 +27,20 @@ bool RotateImportedArtworkClockwise(CanvasState &state,
                                     int imported_artwork_id);
 bool RotateImportedArtworkCounterClockwise(CanvasState &state,
                                            int imported_artwork_id);
+ImportedArtworkOperationResult
+UpdateImportedArtworkOutlineColor(CanvasState &state, int imported_artwork_id,
+                                  const ImVec4 &stroke_color);
+ImportedArtworkOperationResult
+PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
+                                 float weld_tolerance = 0.5f);
+ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
+    CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
+    const ImVec2 &world_end, ImportedArtworkEditMode mode);
+ImportedArtworkOperationResult
+ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
+ImportedArtworkOperationResult
+SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
+                               int guide_id);
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id);
 Guide *FindGuide(CanvasState &state, int guide_id);
 const Guide *FindGuide(const CanvasState &state, int guide_id);
