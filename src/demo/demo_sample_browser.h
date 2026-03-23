@@ -7,7 +7,7 @@
 namespace demo {
 
 struct SampleBrowserState {
-  int selected_index = -1;
+  std::string selected_path;
   std::string error_message;
 };
 
