@@ -49,7 +49,8 @@ enum ImportedArtworkFlags : uint32_t {
 
 constexpr uint32_t kDefaultImportedArtworkFlags =
     static_cast<uint32_t>(ImportedArtworkFlagMovable) |
-    static_cast<uint32_t>(ImportedArtworkFlagResizable);
+    static_cast<uint32_t>(ImportedArtworkFlagResizable) |
+    static_cast<uint32_t>(ImportedArtworkFlagLockScaleRatio);
 
 constexpr bool HasImportedArtworkFlag(uint32_t flags,
                                       ImportedArtworkFlags flag) {

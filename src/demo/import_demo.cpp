@@ -34,6 +34,19 @@ DemoImportFormat DetectImportFormat(const fs::path &path) {
   return DemoImportFormat::Svg;
 }
 
+DemoImportFormat DetectImportFormat(const im2d::ImportedArtwork *artwork) {
+  if (artwork == nullptr) {
+    return DemoImportFormat::None;
+  }
+  if (artwork->source_format == "DXF") {
+    return DemoImportFormat::Dxf;
+  }
+  if (artwork->source_format == "SVG") {
+    return DemoImportFormat::Svg;
+  }
+  return DemoImportFormat::None;
+}
+
 void EnsureDxfLayers(CanvasState &state) {
   if (state.layers.size() != 1) {
     return;
@@ -58,6 +71,21 @@ void ActivateDxfWorkflow(CanvasState &state) {
   state.grid.subdivisions = 5;
   state.ruler_unit = MeasurementUnit::Millimeters;
   EnsureDxfLayers(state);
+}
+
+void SyncWorkflowToSelectedArtwork(CanvasState &state,
+                                   DemoImportFormat *active_format) {
+  const im2d::ImportedArtwork *selected_artwork =
+      im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
+  const DemoImportFormat selected_format = DetectImportFormat(selected_artwork);
+  if (selected_format == DemoImportFormat::None) {
+    return;
+  }
+
+  *active_format = selected_format;
+  state.ruler_unit = selected_format == DemoImportFormat::Dxf
+                         ? MeasurementUnit::Millimeters
+                         : MeasurementUnit::Pixels;
 }
 
 void SetWorkingAreaSizeMillimeters(CanvasState &state, float width_mm,
@@ -101,6 +129,7 @@ void DrawImportInspector(CanvasState &state) {
   static demo::SampleBrowserState browser_state;
   static im2d::importer::ImportResult last_import_result;
   static DemoImportFormat active_format = DemoImportFormat::None;
+  SyncWorkflowToSelectedArtwork(state, &active_format);
   fs::path clicked_path;
   if (demo::DrawSampleBrowserWindow("Samples", fs::path("samples"),
                                     {".svg", ".dxf"}, browser_state,
@@ -115,7 +144,7 @@ void DrawImportInspector(CanvasState &state) {
     }
   }
 
-  ImGui::Begin("Import Demo");
+  ImGui::Begin("Import Controls");
   ImGui::TextUnformatted(
       "Prepared for viewport, artboard, and machine-bed experiments.");
   ImGui::TextUnformatted("Sample assets live under samples/ with collapsible "
@@ -191,7 +220,7 @@ int main(int, char **) {
   try {
     demo::DemoConfig config;
     config.app_title = "im2d import_demo";
-    config.canvas_window_title = "Import Demo";
+    config.canvas_window_title = "Import Canvas";
     config.initialize_state = InitializeImportState;
     config.draw_inspector = DrawImportInspector;
     config.clear_color = ImVec4(0.05f, 0.07f, 0.10f, 1.0f);
