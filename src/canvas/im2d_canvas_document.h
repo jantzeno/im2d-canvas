@@ -13,35 +13,9 @@ void ClearImportedDebugSelection(CanvasState &state);
 void ClearSelectedImportedElements(CanvasState &state);
 bool IsImportedElementSelected(const CanvasState &state, int artwork_id,
                                ImportedElementKind kind, int item_id);
+void RefreshImportedArtworkPartMetadata(ImportedArtwork &artwork);
 void RecomputeImportedArtworkBounds(ImportedArtwork &artwork);
 void RecomputeImportedHierarchyBounds(ImportedArtwork &artwork);
-bool IsImportedArtworkScaleRatioLocked(const ImportedArtwork &artwork);
-void SetImportedArtworkScaleRatioLocked(ImportedArtwork &artwork, bool locked);
-void UpdateImportedArtworkScaleAxis(ImportedArtwork &artwork, int axis,
-                                    float new_value);
-void UpdateImportedArtworkScaleFromTarget(ImportedArtwork &artwork,
-                                          const ImVec2 &target_scale);
-bool FlipImportedArtworkHorizontal(CanvasState &state, int imported_artwork_id);
-bool FlipImportedArtworkVertical(CanvasState &state, int imported_artwork_id);
-bool RotateImportedArtworkClockwise(CanvasState &state,
-                                    int imported_artwork_id);
-bool RotateImportedArtworkCounterClockwise(CanvasState &state,
-                                           int imported_artwork_id);
-ImportedArtworkOperationResult
-UpdateImportedArtworkOutlineColor(CanvasState &state, int imported_artwork_id,
-                                  const ImVec4 &stroke_color);
-ImportedArtworkOperationResult
-PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
-                                 float weld_tolerance = 0.5f);
-ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
-    CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
-    const ImVec2 &world_end, ImportedArtworkEditMode mode);
-ImportedArtworkOperationResult
-ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
-ImportedArtworkOperationResult
-SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
-                               int guide_id);
-bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id);
 Guide *FindGuide(CanvasState &state, int guide_id);
 const Guide *FindGuide(const CanvasState &state, int guide_id);
 ImportedArtwork *FindImportedArtwork(CanvasState &state,

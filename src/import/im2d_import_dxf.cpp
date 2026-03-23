@@ -2,6 +2,7 @@
 
 #include "../canvas/im2d_canvas_document.h"
 #include "../common/im2d_log.h"
+#include "../operations/im2d_operations.h"
 
 #include <algorithm>
 #include <array>
@@ -3127,7 +3128,7 @@ ImportResult ImportDxfFile(CanvasState &state,
         break;
       }
     }
-    FlipImportedArtworkVertical(state, result.artwork_id);
+    operations::FlipImportedArtworkVertical(state, result.artwork_id);
     result.message = "Imported DXF sample and flipped vertically.";
     if (result.warnings_count > 0) {
       log::GetLogger()->warn("DXF import completed with {} warning(s): {}",

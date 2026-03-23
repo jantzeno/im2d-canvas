@@ -1,6 +1,7 @@
 #include "demo_imported_artwork_windows.h"
 
 #include "../canvas/im2d_canvas_document.h"
+#include "../operations/im2d_operations.h"
 
 #include <algorithm>
 
@@ -596,19 +597,21 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
     artwork->scale = ImVec2(1.0f, 1.0f);
   }
 
-  bool lock_scale_ratio = im2d::IsImportedArtworkScaleRatioLocked(*artwork);
+  bool lock_scale_ratio =
+      im2d::operations::IsImportedArtworkScaleRatioLocked(*artwork);
   if (ImGui::Checkbox("Lock Scale Ratio", &lock_scale_ratio)) {
-    im2d::SetImportedArtworkScaleRatioLocked(*artwork, lock_scale_ratio);
+    im2d::operations::SetImportedArtworkScaleRatioLocked(*artwork,
+                                                         lock_scale_ratio);
   }
 
   float scale_x = artwork->scale.x;
   if (ImGui::InputFloat("Scale X", &scale_x, 0.0f, 0.0f, "%.3f")) {
-    im2d::UpdateImportedArtworkScaleAxis(*artwork, 0, scale_x);
+    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 0, scale_x);
   }
 
   float scale_y = artwork->scale.y;
   if (ImGui::InputFloat("Scale Y", &scale_y, 0.0f, 0.0f, "%.3f")) {
-    im2d::UpdateImportedArtworkScaleAxis(*artwork, 1, scale_y);
+    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 1, scale_y);
   }
 
   ImGui::DragFloat2("Adjust Position", &artwork->origin.x, 1.0f, 0.0f, 0.0f,
@@ -616,13 +619,13 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   float drag_scale_x = artwork->scale.x;
   if (ImGui::DragFloat("Adjust Scale X", &drag_scale_x, 0.01f, 0.01f, 100.0f,
                        "%.3f")) {
-    im2d::UpdateImportedArtworkScaleAxis(*artwork, 0, drag_scale_x);
+    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 0, drag_scale_x);
   }
 
   float drag_scale_y = artwork->scale.y;
   if (ImGui::DragFloat("Adjust Scale Y", &drag_scale_y, 0.01f, 0.01f, 100.0f,
                        "%.3f")) {
-    im2d::UpdateImportedArtworkScaleAxis(*artwork, 1, drag_scale_y);
+    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 1, drag_scale_y);
   }
 
   ImGui::Text("Bounds: %.1f x %.1f",
@@ -695,7 +698,8 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
                                         : ImVec4(0.92f, 0.94f, 0.97f, 1.0f));
   if (ImGui::ColorEdit4("Outline Color", &outline_color.x,
                         ImGuiColorEditFlags_Float)) {
-    im2d::UpdateImportedArtworkOutlineColor(state, artwork->id, outline_color);
+    im2d::operations::UpdateImportedArtworkOutlineColor(state, artwork->id,
+                                                        outline_color);
   }
 
   ImportedInspectorFilterMode &filter_mode = GetImportedInspectorFilterMode();
@@ -731,7 +735,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   ImGui::Separator();
 
   if (ImGui::Button("Prepare For Cutting")) {
-    im2d::PrepareImportedArtworkForCutting(state, artwork->id);
+    im2d::operations::PrepareImportedArtworkForCutting(state, artwork->id);
   }
   ImGui::SameLine();
   const bool has_selected_elements = !state.selected_imported_elements.empty();
@@ -739,7 +743,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Extract Selection")) {
-    im2d::ExtractSelectedImportedElements(state, artwork->id);
+    im2d::operations::ExtractSelectedImportedElements(state, artwork->id);
   }
   if (!has_selected_elements) {
     ImGui::EndDisabled();
@@ -789,21 +793,21 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   }
 
   if (ImGui::Button("Flip Horizontal")) {
-    im2d::FlipImportedArtworkHorizontal(state, artwork->id);
+    im2d::operations::FlipImportedArtworkHorizontal(state, artwork->id);
   }
   ImGui::SameLine();
   if (ImGui::Button("Flip Vertical")) {
-    im2d::FlipImportedArtworkVertical(state, artwork->id);
+    im2d::operations::FlipImportedArtworkVertical(state, artwork->id);
   }
   if (ImGui::Button("Rotate 90 CW")) {
-    im2d::RotateImportedArtworkClockwise(state, artwork->id);
+    im2d::operations::RotateImportedArtworkClockwise(state, artwork->id);
   }
   ImGui::SameLine();
   if (ImGui::Button("Rotate 90 CCW")) {
-    im2d::RotateImportedArtworkCounterClockwise(state, artwork->id);
+    im2d::operations::RotateImportedArtworkCounterClockwise(state, artwork->id);
   }
   if (ImGui::Button("Delete")) {
-    im2d::DeleteImportedArtwork(state, artwork->id);
+    im2d::operations::DeleteImportedArtwork(state, artwork->id);
   }
 
   ImGui::End();
