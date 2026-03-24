@@ -216,6 +216,11 @@ struct ImportedHoleOwnership {
   ImportedContourReference hole;
 };
 
+enum class ImportedArtworkPrepareMode {
+  FidelityFirst,
+  AggressiveCleanup,
+};
+
 struct ImportedArtworkOperationResult {
   bool success = false;
   int artwork_id = 0;
@@ -224,6 +229,7 @@ struct ImportedArtworkOperationResult {
   int selected_count = 0;
   int moved_count = 0;
   int skipped_count = 0;
+  int preserved_count = 0;
   int stitched_count = 0;
   int cleaned_count = 0;
   int ambiguous_count = 0;
@@ -235,8 +241,16 @@ struct ImportedArtworkOperationResult {
   int orphan_hole_count = 0;
   int closed_count = 0;
   int open_count = 0;
+  int auto_close_endpoint_count = 0;
+  int auto_close_cluster_count = 0;
+  int auto_close_group_count = 0;
+  int auto_close_component_count = 0;
+  int auto_close_pass_count = 0;
+  float auto_close_elapsed_ms = 0.0f;
   bool cut_ready = false;
   bool nest_ready = false;
+  ImportedArtworkPrepareMode prepare_mode =
+      ImportedArtworkPrepareMode::FidelityFirst;
   std::string message;
 };
 

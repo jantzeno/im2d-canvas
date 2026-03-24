@@ -14,8 +14,12 @@ bool RotateImportedArtworkClockwise(CanvasState &state,
 bool RotateImportedArtworkCounterClockwise(CanvasState &state,
                                            int imported_artwork_id);
 ImportedArtworkOperationResult
-PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
-                                 float weld_tolerance = 0.5f);
+AutoCloseImportedArtworkToPolyline(CanvasState &state, int imported_artwork_id,
+                                   float weld_tolerance = 0.5f);
+ImportedArtworkOperationResult PrepareImportedArtworkForCutting(
+    CanvasState &state, int imported_artwork_id, float weld_tolerance = 0.5f,
+    ImportedArtworkPrepareMode mode = ImportedArtworkPrepareMode::FidelityFirst,
+    bool auto_close_to_polyline = false);
 ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
     CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
     const ImVec2 &world_end, ImportedArtworkEditMode mode);

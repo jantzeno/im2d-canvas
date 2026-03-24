@@ -1,9 +1,15 @@
 #include "demo_imported_artwork_windows.h"
 
 #include "../canvas/im2d_canvas_document.h"
+#include "../export/im2d_export_svg.h"
 #include "../operations/im2d_operations.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <filesystem>
+#include <future>
 
 #include <imgui.h>
 
@@ -24,12 +30,383 @@ ImportedInspectorFilterMode &GetImportedInspectorFilterMode() {
   return mode;
 }
 
+im2d::exporter::SvgExportResult &GetSvgExportPreview() {
+  static im2d::exporter::SvgExportResult result;
+  return result;
+}
+
+struct SvgExportUiState {
+  int configured_artwork_id = 0;
+  int configured_export_area_id = 0;
+  bool allow_placeholder_text = false;
+  std::array<char, 256> output_directory = {};
+  std::array<char, 128> selection_filename = {};
+  std::array<char, 128> export_area_filename = {};
+};
+
+struct PrepareWorkflowUiState {
+  bool auto_close_before_prepare = false;
+};
+
+SvgExportUiState &GetSvgExportUiState() {
+  static SvgExportUiState state;
+  return state;
+}
+
+PrepareWorkflowUiState &GetPrepareWorkflowUiState() {
+  static PrepareWorkflowUiState state;
+  return state;
+}
+
+constexpr const char *kPrepareForCuttingPopupId =
+    "Prepare For Cutting##Confirm";
+
+struct AsyncPrepareForCuttingResult {
+  im2d::ImportedArtwork prepared_artwork;
+  im2d::ImportedArtworkOperationResult operation;
+  std::vector<im2d::ImportedElementSelection> issue_elements;
+  std::string error_message;
+};
+
+struct PrepareForCuttingUiState {
+  bool open_requested = false;
+  bool running = false;
+  bool close_requested = false;
+  bool auto_close_to_polyline = false;
+  int artwork_id = 0;
+  float weld_tolerance = 0.5f;
+  im2d::ImportedArtworkPrepareMode mode =
+      im2d::ImportedArtworkPrepareMode::FidelityFirst;
+  std::string artwork_name;
+  std::future<AsyncPrepareForCuttingResult> future;
+};
+
+PrepareForCuttingUiState &GetPrepareForCuttingUiState() {
+  static PrepareForCuttingUiState state;
+  return state;
+}
+
+void ResetPrepareForCuttingUiState(PrepareForCuttingUiState *ui_state) {
+  if (ui_state == nullptr) {
+    return;
+  }
+  ui_state->open_requested = false;
+  ui_state->running = false;
+  ui_state->close_requested = false;
+  ui_state->artwork_id = 0;
+  ui_state->weld_tolerance = 0.5f;
+  ui_state->mode = im2d::ImportedArtworkPrepareMode::FidelityFirst;
+  ui_state->artwork_name.clear();
+  ui_state->future = std::future<AsyncPrepareForCuttingResult>();
+}
+
+std::future<AsyncPrepareForCuttingResult> StartPrepareForCuttingAsync(
+    const im2d::ImportedArtwork &artwork, float weld_tolerance,
+    im2d::ImportedArtworkPrepareMode mode, bool auto_close_to_polyline) {
+  return std::async(std::launch::async, [artwork, weld_tolerance, mode,
+                                         auto_close_to_polyline]() mutable {
+    AsyncPrepareForCuttingResult async_result;
+    try {
+      im2d::CanvasState worker_state;
+      worker_state.imported_artwork.push_back(artwork);
+      worker_state.next_imported_artwork_id = std::max(artwork.id + 1, 1);
+      worker_state.next_imported_part_id =
+          std::max(artwork.part.part_id + 1, 1);
+
+      async_result.operation = im2d::PrepareImportedArtworkForCutting(
+          worker_state, artwork.id, weld_tolerance, mode,
+          auto_close_to_polyline);
+      async_result.issue_elements =
+          worker_state.last_imported_operation_issue_elements;
+
+      const im2d::ImportedArtwork *prepared_artwork =
+          im2d::FindImportedArtwork(worker_state, artwork.id);
+      if (prepared_artwork == nullptr) {
+        async_result.error_message = "Prepared artwork was not available after "
+                                     "background processing.";
+        return async_result;
+      }
+
+      async_result.prepared_artwork = *prepared_artwork;
+    } catch (const std::exception &error) {
+      async_result.error_message = error.what();
+    } catch (...) {
+      async_result.error_message =
+          "Unknown error while preparing imported artwork.";
+    }
+    return async_result;
+  });
+}
+
+void ApplyPrepareForCuttingResult(im2d::CanvasState &state, int artwork_id,
+                                  AsyncPrepareForCuttingResult async_result) {
+  im2d::ImportedArtwork *artwork = im2d::FindImportedArtwork(state, artwork_id);
+  if (artwork == nullptr) {
+    state.last_imported_artwork_operation = {};
+    state.last_imported_artwork_operation.artwork_id = artwork_id;
+    state.last_imported_artwork_operation.message =
+        "Prepare-for-cutting result was discarded because the artwork no "
+        "longer exists.";
+    state.last_imported_operation_issue_artwork_id = 0;
+    state.last_imported_operation_issue_elements.clear();
+    return;
+  }
+
+  if (!async_result.error_message.empty()) {
+    state.last_imported_artwork_operation = {};
+    state.last_imported_artwork_operation.artwork_id = artwork_id;
+    state.last_imported_artwork_operation.message =
+        "Prepare-for-cutting failed: " + async_result.error_message;
+    state.last_imported_operation_issue_artwork_id = 0;
+    state.last_imported_operation_issue_elements.clear();
+    return;
+  }
+
+  *artwork = std::move(async_result.prepared_artwork);
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Artwork,
+                                   artwork_id, 0};
+  im2d::ClearSelectedImportedElements(state);
+  state.last_imported_artwork_operation = std::move(async_result.operation);
+  state.last_imported_operation_issue_artwork_id = artwork_id;
+  state.last_imported_operation_issue_elements =
+      std::move(async_result.issue_elements);
+}
+
+void QueuePrepareForCuttingDialog(const im2d::ImportedArtwork &artwork,
+                                  float weld_tolerance,
+                                  im2d::ImportedArtworkPrepareMode mode) {
+  PrepareForCuttingUiState &ui_state = GetPrepareForCuttingUiState();
+  if (ui_state.running) {
+    return;
+  }
+
+  ui_state.open_requested = true;
+  ui_state.close_requested = false;
+  ui_state.artwork_id = artwork.id;
+  ui_state.weld_tolerance = weld_tolerance;
+  ui_state.mode = mode;
+  ui_state.auto_close_to_polyline =
+      GetPrepareWorkflowUiState().auto_close_before_prepare;
+  ui_state.artwork_name = artwork.name;
+}
+
+void DrawPrepareForCuttingModal(im2d::CanvasState &state) {
+  PrepareForCuttingUiState &ui_state = GetPrepareForCuttingUiState();
+  if (ui_state.open_requested) {
+    ImGui::OpenPopup(kPrepareForCuttingPopupId);
+    ui_state.open_requested = false;
+  }
+
+  if (ui_state.running && ui_state.future.valid() &&
+      ui_state.future.wait_for(std::chrono::milliseconds(0)) ==
+          std::future_status::ready) {
+    ApplyPrepareForCuttingResult(state, ui_state.artwork_id,
+                                 ui_state.future.get());
+    ui_state.running = false;
+    ui_state.close_requested = true;
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_Appearing);
+  if (!ImGui::BeginPopupModal(kPrepareForCuttingPopupId, nullptr,
+                              ImGuiWindowFlags_AlwaysAutoResize)) {
+    return;
+  }
+
+  const char *mode_label =
+      ui_state.mode == im2d::ImportedArtworkPrepareMode::AggressiveCleanup
+          ? "Prepare + Weld Cleanup"
+          : "Prepare For Cutting";
+  ImGui::TextUnformatted(mode_label);
+  ImGui::Separator();
+  ImGui::TextWrapped("Artwork: %s", ui_state.artwork_name.c_str());
+
+  if (!ui_state.running) {
+    ImGui::TextWrapped(
+        "This operation can take a while on dense DXF artwork. Start it in "
+        "the background and keep the UI responsive.");
+    ImGui::Text("Weld Tolerance: %.2f", ui_state.weld_tolerance);
+    ImGui::Checkbox("Auto Close To Polyline First",
+                    &ui_state.auto_close_to_polyline);
+    ImGui::Spacing();
+    if (ImGui::Button("Start", ImVec2(120.0f, 0.0f))) {
+      if (const im2d::ImportedArtwork *artwork =
+              im2d::FindImportedArtwork(state, ui_state.artwork_id);
+          artwork != nullptr) {
+        ui_state.artwork_name = artwork->name;
+        ui_state.future = StartPrepareForCuttingAsync(
+            *artwork, ui_state.weld_tolerance, ui_state.mode,
+            ui_state.auto_close_to_polyline);
+        ui_state.running = true;
+      } else {
+        state.last_imported_artwork_operation = {};
+        state.last_imported_artwork_operation.message =
+            "Prepare-for-cutting could not start because the selected "
+            "artwork was not found.";
+        ui_state.close_requested = true;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+      ui_state.close_requested = true;
+    }
+  } else {
+    ImGui::TextWrapped("Preparing imported artwork in the background...");
+    ImGui::Text("Auto Close To Polyline: %s",
+                ui_state.auto_close_to_polyline ? "On" : "Off");
+    const double phase = ImGui::GetTime() * 0.35;
+    const float progress = static_cast<float>(phase - std::floor(phase));
+    ImGui::ProgressBar(progress, ImVec2(320.0f, 0.0f), "Working...");
+    ImGui::TextUnformatted("The popup will close automatically when done.");
+  }
+
+  if (ui_state.close_requested) {
+    ImGui::CloseCurrentPopup();
+    ResetPrepareForCuttingUiState(&ui_state);
+  }
+  ImGui::EndPopup();
+}
+
+template <size_t N>
+void CopyTextToBuffer(const std::string &text, std::array<char, N> *buffer) {
+  if (buffer == nullptr || N == 0) {
+    return;
+  }
+  std::snprintf(buffer->data(), buffer->size(), "%s", text.c_str());
+}
+
+template <size_t N> std::string BufferText(const std::array<char, N> &buffer) {
+  return std::string(buffer.data());
+}
+
+std::string SanitizeExportStem(const std::string &text) {
+  std::string stem;
+  stem.reserve(text.size());
+  for (const char character : text) {
+    if ((character >= 'a' && character <= 'z') ||
+        (character >= 'A' && character <= 'Z') ||
+        (character >= '0' && character <= '9')) {
+      stem.push_back(static_cast<char>(std::tolower(character)));
+      continue;
+    }
+    if (!stem.empty() && stem.back() != '-') {
+      stem.push_back('-');
+    }
+  }
+  while (!stem.empty() && stem.back() == '-') {
+    stem.pop_back();
+  }
+  return stem.empty() ? "artwork" : stem;
+}
+
+std::filesystem::path
+DefaultSelectionExportPath(const im2d::ImportedArtwork &artwork) {
+  return std::filesystem::path("build") / "exports" /
+         (SanitizeExportStem(artwork.name) + "-selection.svg");
+}
+
+std::filesystem::path DefaultExportAreaPath(const im2d::CanvasState &state) {
+  const int export_area_id =
+      state.export_areas.empty() ? 0 : state.export_areas.front().id;
+  return std::filesystem::path("build") / "exports" /
+         ("export-area-" + std::to_string(export_area_id) + ".svg");
+}
+
+void SyncSvgExportUiState(SvgExportUiState *ui_state,
+                          const im2d::CanvasState &state,
+                          const im2d::ImportedArtwork &artwork) {
+  if (ui_state == nullptr) {
+    return;
+  }
+
+  const int export_area_id =
+      state.export_areas.empty() ? 0 : state.export_areas.front().id;
+  if (ui_state->configured_artwork_id == artwork.id &&
+      ui_state->configured_export_area_id == export_area_id &&
+      ui_state->output_directory[0] != '\0' &&
+      ui_state->selection_filename[0] != '\0' &&
+      ui_state->export_area_filename[0] != '\0') {
+    return;
+  }
+
+  const std::filesystem::path selection_path =
+      DefaultSelectionExportPath(artwork);
+  const std::filesystem::path export_area_path = DefaultExportAreaPath(state);
+  const std::filesystem::path output_directory =
+      selection_path.has_parent_path() ? selection_path.parent_path()
+                                       : std::filesystem::path(".");
+
+  CopyTextToBuffer(output_directory.string(), &ui_state->output_directory);
+  CopyTextToBuffer(selection_path.filename().string(),
+                   &ui_state->selection_filename);
+  CopyTextToBuffer(export_area_path.filename().string(),
+                   &ui_state->export_area_filename);
+  ui_state->configured_artwork_id = artwork.id;
+  ui_state->configured_export_area_id = export_area_id;
+}
+
+std::filesystem::path BuildExportPath(const std::array<char, 256> &directory,
+                                      const std::array<char, 128> &filename,
+                                      const std::filesystem::path &fallback) {
+  const std::string directory_text = BufferText(directory);
+  const std::string filename_text = BufferText(filename);
+  if (directory_text.empty() || filename_text.empty()) {
+    return fallback;
+  }
+  return std::filesystem::path(directory_text) / filename_text;
+}
+
 bool HasAnyDxfArtwork(const im2d::CanvasState &state) {
   return std::any_of(state.imported_artwork.begin(),
                      state.imported_artwork.end(),
                      [](const im2d::ImportedArtwork &artwork) {
                        return artwork.source_format == "DXF";
                      });
+}
+
+std::string SvgExportSummary(const im2d::exporter::SvgExportResult &result) {
+  if (result.message.empty()) {
+    return {};
+  }
+
+  std::string summary = result.message;
+  if (!result.success) {
+    return summary;
+  }
+
+  summary +=
+      " Bounds: " + std::to_string(result.bounds_max.x - result.bounds_min.x) +
+      " x " + std::to_string(result.bounds_max.y - result.bounds_min.y);
+  summary += ", lines=" + std::to_string(result.line_segment_count);
+  summary += ", cubics=" + std::to_string(result.cubic_segment_count);
+  if (result.placeholder_text_count > 0) {
+    summary +=
+        ", placeholder-text=" + std::to_string(result.placeholder_text_count);
+  }
+  if (result.substituted_font_text_count > 0) {
+    summary += ", substituted-font=" +
+               std::to_string(result.substituted_font_text_count);
+  }
+  if (result.open_geometry_item_count > 0) {
+    summary +=
+        ", open-items=" + std::to_string(result.open_geometry_item_count);
+  }
+  summary += ", bytes=" + std::to_string(result.svg.size());
+  if (!result.output_path.empty()) {
+    summary += ", file=" + result.output_path;
+  }
+  return summary;
+}
+
+void DrawSvgExportWarnings(const im2d::exporter::SvgExportResult &result) {
+  if (result.warnings.empty()) {
+    return;
+  }
+
+  ImGui::TextUnformatted("Export Warnings");
+  for (const std::string &warning : result.warnings) {
+    ImGui::BulletText("%s", warning.c_str());
+  }
 }
 
 void SelectImportedArtwork(im2d::CanvasState &state, int artwork_id) {
@@ -554,6 +931,7 @@ void DrawImportedArtworkListWindow(im2d::CanvasState &state,
 void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
                                         const char *window_title) {
   ImGui::Begin(window_title);
+  DrawPrepareForCuttingModal(state);
 
   im2d::ImportedArtwork *artwork =
       im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
@@ -734,8 +1112,24 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   }
   ImGui::Separator();
 
+  if (ImGui::Button("Auto Close To Polyline")) {
+    im2d::AutoCloseImportedArtworkToPolyline(state, artwork->id);
+  }
+  ImGui::SameLine();
+  PrepareWorkflowUiState &prepare_workflow = GetPrepareWorkflowUiState();
+  ImGui::Checkbox("Auto Close Before Prepare",
+                  &prepare_workflow.auto_close_before_prepare);
+
+  ImGui::Separator();
+
   if (ImGui::Button("Prepare For Cutting")) {
-    im2d::operations::PrepareImportedArtworkForCutting(state, artwork->id);
+    QueuePrepareForCuttingDialog(
+        *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::FidelityFirst);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Prepare + Weld Cleanup")) {
+    QueuePrepareForCuttingDialog(
+        *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::AggressiveCleanup);
   }
   ImGui::SameLine();
   const bool has_selected_elements = !state.selected_imported_elements.empty();
@@ -747,6 +1141,108 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   }
   if (!has_selected_elements) {
     ImGui::EndDisabled();
+  }
+
+  SvgExportUiState &export_ui = GetSvgExportUiState();
+  SyncSvgExportUiState(&export_ui, state, *artwork);
+  const std::filesystem::path selection_export_path =
+      BuildExportPath(export_ui.output_directory, export_ui.selection_filename,
+                      DefaultSelectionExportPath(*artwork));
+  const std::filesystem::path export_area_path = BuildExportPath(
+      export_ui.output_directory, export_ui.export_area_filename,
+      DefaultExportAreaPath(state));
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("SVG Export");
+  ImGui::Checkbox("Allow Placeholder DXF Export (Diagnostics)",
+                  &export_ui.allow_placeholder_text);
+  ImGui::InputText("Output Directory", export_ui.output_directory.data(),
+                   export_ui.output_directory.size());
+  ImGui::InputText("Selection File", export_ui.selection_filename.data(),
+                   export_ui.selection_filename.size());
+  ImGui::InputText("Export Area File", export_ui.export_area_filename.data(),
+                   export_ui.export_area_filename.size());
+  if (ImGui::Button("Reset Export Paths")) {
+    export_ui.configured_artwork_id = 0;
+    export_ui.configured_export_area_id = 0;
+    SyncSvgExportUiState(&export_ui, state, *artwork);
+  }
+  ImGui::TextWrapped("Selection Save Path: %s",
+                     selection_export_path.lexically_normal().string().c_str());
+  ImGui::TextWrapped("Export-Area Save Path: %s",
+                     export_area_path.lexically_normal().string().c_str());
+
+  ImGui::SameLine();
+  if (!has_selected_elements) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Preview Selection SVG")) {
+    im2d::exporter::SvgExportRequest request;
+    request.scope = im2d::exporter::SvgExportScope::ActiveSelection;
+    request.imported_artwork_id = artwork->id;
+    request.allow_placeholder_text = export_ui.allow_placeholder_text;
+    GetSvgExportPreview() = im2d::exporter::ExportSvg(state, request);
+  }
+  if (!has_selected_elements) {
+    ImGui::EndDisabled();
+  }
+  ImGui::SameLine();
+  if (!has_selected_elements) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Save Selection SVG")) {
+    im2d::exporter::SvgExportRequest request;
+    request.scope = im2d::exporter::SvgExportScope::ActiveSelection;
+    request.imported_artwork_id = artwork->id;
+    request.allow_placeholder_text = export_ui.allow_placeholder_text;
+    GetSvgExportPreview() =
+        im2d::exporter::ExportSvgToFile(state, request, selection_export_path);
+  }
+  if (!has_selected_elements) {
+    ImGui::EndDisabled();
+  }
+
+  const bool has_export_area = !state.export_areas.empty();
+  if (!has_export_area) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Preview Export Area SVG")) {
+    im2d::exporter::SvgExportRequest request;
+    request.scope = im2d::exporter::SvgExportScope::ExportArea;
+    request.allow_placeholder_text = export_ui.allow_placeholder_text;
+    GetSvgExportPreview() = im2d::exporter::ExportSvg(state, request);
+  }
+  if (!has_export_area) {
+    ImGui::EndDisabled();
+  }
+  ImGui::SameLine();
+  if (!has_export_area) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Save Export Area SVG")) {
+    im2d::exporter::SvgExportRequest request;
+    request.scope = im2d::exporter::SvgExportScope::ExportArea;
+    request.allow_placeholder_text = export_ui.allow_placeholder_text;
+    GetSvgExportPreview() =
+        im2d::exporter::ExportSvgToFile(state, request, export_area_path);
+  }
+  if (!has_export_area) {
+    ImGui::EndDisabled();
+  }
+  ImGui::SameLine();
+  if (GetSvgExportPreview().svg.empty()) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Copy Preview SVG")) {
+    ImGui::SetClipboardText(GetSvgExportPreview().svg.c_str());
+  }
+  if (GetSvgExportPreview().svg.empty()) {
+    ImGui::EndDisabled();
+  }
+
+  if (!GetSvgExportPreview().message.empty()) {
+    ImGui::TextWrapped("%s", SvgExportSummary(GetSvgExportPreview()).c_str());
+    DrawSvgExportWarnings(GetSvgExportPreview());
   }
 
   const im2d::ImportedArtworkOperationResult &operation =
@@ -773,7 +1269,18 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
       }
       if (operation.stitched_count > 0 || operation.cleaned_count > 0 ||
           operation.ambiguous_count > 0 || operation.closed_count > 0 ||
-          operation.open_count > 0 || operation.placeholder_count > 0) {
+          operation.open_count > 0 || operation.placeholder_count > 0 ||
+          operation.preserved_count > 0) {
+        const bool operation_is_prepare =
+            operation.message.rfind("Prepare", 0) == 0;
+        if (operation_is_prepare) {
+          ImGui::Text(
+              "Mode: %s",
+              operation.prepare_mode ==
+                      im2d::ImportedArtworkPrepareMode::AggressiveCleanup
+                  ? "Prepare + Weld Cleanup"
+                  : "Prepare For Cutting");
+        }
         ImGui::Text("Part ID: %d", operation.part_id);
         ImGui::Text("Cut Ready: %s", operation.cut_ready ? "Yes" : "No");
         ImGui::Text("Nest Ready: %s", operation.nest_ready ? "Yes" : "No");
@@ -782,6 +1289,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
         ImGui::Text("Holes: %d", operation.hole_count);
         ImGui::Text("Attached Holes: %d", operation.attached_hole_count);
         ImGui::Text("Orphan Holes: %d", operation.orphan_hole_count);
+        ImGui::Text("Preserved: %d", operation.preserved_count);
         ImGui::Text("Stitched: %d", operation.stitched_count);
         ImGui::Text("Cleaned: %d", operation.cleaned_count);
         ImGui::Text("Ambiguous Cleanup: %d", operation.ambiguous_count);

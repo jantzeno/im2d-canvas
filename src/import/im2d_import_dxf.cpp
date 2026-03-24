@@ -36,20 +36,10 @@ constexpr double kEpsilon = 1e-6;
 constexpr int kMaxImported3dFaces = 20000;
 constexpr int kPolylineFlagClosed = 0x01;
 constexpr int kPolylineFlagPolyfaceMesh = 0x40;
-constexpr unsigned int kDxfTextPlaceholderColor = 0x00ff01ffu;
-constexpr unsigned int kDxfFilledTextColor = 0x00ff02ffu;
-constexpr unsigned int kDxfHoleTextColor = 0x00ff03ffu;
 
 std::string FormatNumber(double value) {
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(3) << value;
-  return stream.str();
-}
-
-std::string SvgHexColor(unsigned int color) {
-  std::ostringstream stream;
-  stream << '#' << std::hex << std::setw(6) << std::setfill('0')
-         << (color & 0x00ffffffu);
   return stream.str();
 }
 
@@ -730,65 +720,7 @@ public:
                     double line_spacing_factor, ImportedDxfText *imported_text,
                     const std::function<void(double, double)> &update_bounds);
 
-  [[maybe_unused]] bool
-  AppendTextSvg(const std::string &text, double anchor_x, double anchor_y,
-                double height, double widthscale, double angle_degrees,
-                HorizontalTextAlignment horizontal_alignment,
-                VerticalTextAlignment vertical_alignment,
-                double line_spacing_factor, std::string_view stroke_color,
-                unsigned int marker_color, std::ostringstream &body,
-                const std::function<void(double, double)> &update_bounds);
-
 private:
-  struct OutlineSvgBuilder {
-    struct Contour {
-      std::ostringstream path;
-      std::vector<std::pair<double, double>> samples;
-
-      double SignedArea() const {
-        if (samples.size() < 3) {
-          return 0.0;
-        }
-
-        double twice_area = 0.0;
-        for (size_t index = 0; index < samples.size(); ++index) {
-          const auto &[x1, y1] = samples[index];
-          const auto &[x2, y2] = samples[(index + 1) % samples.size()];
-          twice_area += x1 * y2 - x2 * y1;
-        }
-        return twice_area * 0.5;
-      }
-    };
-
-    double anchor_x = 0.0;
-    double anchor_y = 0.0;
-    double scale = 1.0;
-    double widthscale = 1.0;
-    double pen_x_units = 0.0;
-    double line_offset_x = 0.0;
-    double baseline_y = 0.0;
-    double cosine = 1.0;
-    double sine = 0.0;
-    std::function<void(double, double)> update_bounds;
-    double current_x = 0.0;
-    double current_y = 0.0;
-    bool contour_open = false;
-    bool has_geometry = false;
-    std::vector<Contour> contours;
-    size_t current_contour_index = 0;
-
-    std::pair<double, double> TransformPoint(double x_units,
-                                             double y_units) const;
-    Contour *CurrentContour() {
-      if (!contour_open || current_contour_index >= contours.size()) {
-        return nullptr;
-      }
-      return &contours[current_contour_index];
-    }
-
-    void CloseContour();
-  };
-
   struct OutlineGeometryBuilder {
     struct Contour {
       std::vector<ImportedPathSegment> segments;
@@ -838,12 +770,6 @@ private:
     void CloseContour() { contour_open = false; }
   };
 
-  static int MoveTo(const FT_Vector *to, void *user);
-  static int LineTo(const FT_Vector *to, void *user);
-  static int ConicTo(const FT_Vector *control, const FT_Vector *to, void *user);
-  static int CubicTo(const FT_Vector *control1, const FT_Vector *control2,
-                     const FT_Vector *to, void *user);
-
   static int GeometryMoveTo(const FT_Vector *to, void *user);
   static int GeometryLineTo(const FT_Vector *to, void *user);
   static int GeometryConicTo(const FT_Vector *control, const FT_Vector *to,
@@ -860,27 +786,11 @@ private:
                     double line_offset_x, double baseline_y, double cosine,
                     double sine, ImportedDxfText *imported_text,
                     const std::function<void(double, double)> &update_bounds);
-  bool AppendLineSvg(const std::vector<uint32_t> &line, double anchor_x,
-                     double anchor_y, double scale, double widthscale,
-                     double line_offset_x, double baseline_y, double cosine,
-                     double sine, std::string_view stroke_color,
-                     unsigned int marker_color, std::ostringstream &body,
-                     const std::function<void(double, double)> &update_bounds);
 
   FT_Library library_ = nullptr;
   FT_Face face_ = nullptr;
   std::string font_path_;
 };
-
-std::pair<double, double>
-VectorGlyphFont::OutlineSvgBuilder::TransformPoint(double x_units,
-                                                   double y_units) const {
-  const double local_x =
-      line_offset_x + (pen_x_units + x_units) * scale * widthscale;
-  const double local_y = baseline_y + y_units * scale;
-  return {anchor_x + local_x * cosine - local_y * sine,
-          anchor_y + local_x * sine + local_y * cosine};
-}
 
 std::pair<double, double>
 VectorGlyphFont::OutlineGeometryBuilder::TransformPoint(double x_units,
@@ -890,134 +800,6 @@ VectorGlyphFont::OutlineGeometryBuilder::TransformPoint(double x_units,
   const double local_y = baseline_y + y_units * scale;
   return {anchor_x + local_x * cosine - local_y * sine,
           anchor_y + local_x * sine + local_y * cosine};
-}
-
-void VectorGlyphFont::OutlineSvgBuilder::CloseContour() {
-  if (contour_open) {
-    contours[current_contour_index].path << "Z ";
-    contour_open = false;
-  }
-}
-
-int VectorGlyphFont::MoveTo(const FT_Vector *to, void *user) {
-  auto *builder = static_cast<OutlineSvgBuilder *>(user);
-  builder->CloseContour();
-  const auto [x, y] = builder->TransformPoint(static_cast<double>(to->x),
-                                              static_cast<double>(to->y));
-  builder->contours.emplace_back();
-  builder->current_contour_index = builder->contours.size() - 1;
-  builder->contours.back().path << "M " << FormatNumber(x) << ' '
-                                << FormatNumber(y) << ' ';
-  builder->contours.back().samples.emplace_back(static_cast<double>(to->x),
-                                                static_cast<double>(to->y));
-  builder->update_bounds(x, y);
-  builder->current_x = static_cast<double>(to->x);
-  builder->current_y = static_cast<double>(to->y);
-  builder->contour_open = true;
-  builder->has_geometry = true;
-  return 0;
-}
-
-int VectorGlyphFont::LineTo(const FT_Vector *to, void *user) {
-  auto *builder = static_cast<OutlineSvgBuilder *>(user);
-  const auto [x, y] = builder->TransformPoint(static_cast<double>(to->x),
-                                              static_cast<double>(to->y));
-  if (auto *contour = builder->CurrentContour(); contour != nullptr) {
-    contour->path << "L " << FormatNumber(x) << ' ' << FormatNumber(y) << ' ';
-    contour->samples.emplace_back(static_cast<double>(to->x),
-                                  static_cast<double>(to->y));
-  }
-  builder->update_bounds(x, y);
-  builder->current_x = static_cast<double>(to->x);
-  builder->current_y = static_cast<double>(to->y);
-  builder->has_geometry = true;
-  return 0;
-}
-
-int VectorGlyphFont::ConicTo(const FT_Vector *control, const FT_Vector *to,
-                             void *user) {
-  auto *builder = static_cast<OutlineSvgBuilder *>(user);
-  const double control_x = static_cast<double>(control->x);
-  const double control_y = static_cast<double>(control->y);
-  const double end_x = static_cast<double>(to->x);
-  const double end_y = static_cast<double>(to->y);
-  const double cubic1_x =
-      builder->current_x + (2.0 / 3.0) * (control_x - builder->current_x);
-  const double cubic1_y =
-      builder->current_y + (2.0 / 3.0) * (control_y - builder->current_y);
-  const double cubic2_x = end_x + (2.0 / 3.0) * (control_x - end_x);
-  const double cubic2_y = end_y + (2.0 / 3.0) * (control_y - end_y);
-  const auto [x1, y1] = builder->TransformPoint(cubic1_x, cubic1_y);
-  const auto [x2, y2] = builder->TransformPoint(cubic2_x, cubic2_y);
-  const auto [x3, y3] = builder->TransformPoint(end_x, end_y);
-  if (auto *contour = builder->CurrentContour(); contour != nullptr) {
-    contour->path << "C " << FormatNumber(x1) << ' ' << FormatNumber(y1) << ' '
-                  << FormatNumber(x2) << ' ' << FormatNumber(y2) << ' '
-                  << FormatNumber(x3) << ' ' << FormatNumber(y3) << ' ';
-    constexpr int kCurveSamples = 8;
-    for (int sample_index = 1; sample_index <= kCurveSamples; ++sample_index) {
-      const double t = static_cast<double>(sample_index) /
-                       static_cast<double>(kCurveSamples);
-      const double mt = 1.0 - t;
-      const double sample_x = mt * mt * builder->current_x +
-                              2.0 * mt * t * control_x + t * t * end_x;
-      const double sample_y = mt * mt * builder->current_y +
-                              2.0 * mt * t * control_y + t * t * end_y;
-      contour->samples.emplace_back(sample_x, sample_y);
-    }
-  }
-  builder->update_bounds(x1, y1);
-  builder->update_bounds(x2, y2);
-  builder->update_bounds(x3, y3);
-  builder->current_x = end_x;
-  builder->current_y = end_y;
-  builder->has_geometry = true;
-  return 0;
-}
-
-int VectorGlyphFont::CubicTo(const FT_Vector *control1,
-                             const FT_Vector *control2, const FT_Vector *to,
-                             void *user) {
-  auto *builder = static_cast<OutlineSvgBuilder *>(user);
-  const auto [x1, y1] = builder->TransformPoint(
-      static_cast<double>(control1->x), static_cast<double>(control1->y));
-  const auto [x2, y2] = builder->TransformPoint(
-      static_cast<double>(control2->x), static_cast<double>(control2->y));
-  const auto [x3, y3] = builder->TransformPoint(static_cast<double>(to->x),
-                                                static_cast<double>(to->y));
-  if (auto *contour = builder->CurrentContour(); contour != nullptr) {
-    contour->path << "C " << FormatNumber(x1) << ' ' << FormatNumber(y1) << ' '
-                  << FormatNumber(x2) << ' ' << FormatNumber(y2) << ' '
-                  << FormatNumber(x3) << ' ' << FormatNumber(y3) << ' ';
-    constexpr int kCurveSamples = 8;
-    const double start_x = builder->current_x;
-    const double start_y = builder->current_y;
-    const double control1_x = static_cast<double>(control1->x);
-    const double control1_y = static_cast<double>(control1->y);
-    const double control2_x = static_cast<double>(control2->x);
-    const double control2_y = static_cast<double>(control2->y);
-    const double end_x = static_cast<double>(to->x);
-    const double end_y = static_cast<double>(to->y);
-    for (int sample_index = 1; sample_index <= kCurveSamples; ++sample_index) {
-      const double t = static_cast<double>(sample_index) /
-                       static_cast<double>(kCurveSamples);
-      const double mt = 1.0 - t;
-      const double sample_x = mt * mt * mt * start_x +
-                              3.0 * mt * mt * t * control1_x +
-                              3.0 * mt * t * t * control2_x + t * t * t * end_x;
-      const double sample_y = mt * mt * mt * start_y +
-                              3.0 * mt * mt * t * control1_y +
-                              3.0 * mt * t * t * control2_y + t * t * t * end_y;
-      contour->samples.emplace_back(sample_x, sample_y);
-    }
-  }
-  builder->update_bounds(x1, y1);
-  builder->update_bounds(x2, y2);
-  builder->update_bounds(x3, y3);
-  builder->current_x = static_cast<double>(to->x);
-  builder->current_y = static_cast<double>(to->y);
-  builder->has_geometry = true;
-  return 0;
 }
 
 int VectorGlyphFont::GeometryMoveTo(const FT_Vector *to, void *user) {
@@ -1372,163 +1154,6 @@ bool VectorGlyphFont::BuildTextGeometry(
         line_offset_x,
         baseline_shift - line_height * static_cast<double>(line_index), cosine,
         sine, imported_text, update_bounds);
-  }
-  return emitted_any;
-}
-
-bool VectorGlyphFont::AppendLineSvg(
-    const std::vector<uint32_t> &line, double anchor_x, double anchor_y,
-    double scale, double widthscale, double line_offset_x, double baseline_y,
-    double cosine, double sine, std::string_view stroke_color,
-    unsigned int marker_color, std::ostringstream &body,
-    const std::function<void(double, double)> &update_bounds) {
-  FT_UInt previous_glyph = 0;
-  double pen_x_units = 0.0;
-  bool emitted_any = false;
-  for (uint32_t codepoint : line) {
-    const FT_UInt glyph_index = ResolveGlyphIndex(codepoint);
-    if (glyph_index == 0) {
-      pen_x_units += std::max<double>(face_->units_per_EM * 0.5, 1.0);
-      previous_glyph = 0;
-      continue;
-    }
-    if (FT_HAS_KERNING(face_) && previous_glyph != 0) {
-      FT_Vector kerning = {};
-      FT_Get_Kerning(face_, previous_glyph, glyph_index, FT_KERNING_UNSCALED,
-                     &kerning);
-      pen_x_units += static_cast<double>(kerning.x);
-    }
-    if (FT_Load_Glyph(face_, glyph_index,
-                      FT_LOAD_NO_SCALE | FT_LOAD_NO_HINTING |
-                          FT_LOAD_NO_BITMAP) != 0) {
-      previous_glyph = glyph_index;
-      continue;
-    }
-    if (face_->glyph->format == FT_GLYPH_FORMAT_OUTLINE &&
-        face_->glyph->outline.n_contours > 0) {
-      OutlineSvgBuilder builder;
-      builder.anchor_x = anchor_x;
-      builder.anchor_y = anchor_y;
-      builder.scale = scale;
-      builder.widthscale = widthscale;
-      builder.pen_x_units = pen_x_units;
-      builder.line_offset_x = line_offset_x;
-      builder.baseline_y = baseline_y;
-      builder.cosine = cosine;
-      builder.sine = sine;
-      builder.update_bounds = update_bounds;
-      FT_Outline_Funcs callbacks = {&MoveTo, &LineTo, &ConicTo, &CubicTo, 0, 0};
-      if (FT_Outline_Decompose(&face_->glyph->outline, &callbacks, &builder) ==
-          0) {
-        builder.CloseContour();
-        if (builder.has_geometry) {
-          int dominant_sign = 1;
-          double dominant_area = 0.0;
-          for (const OutlineSvgBuilder::Contour &contour : builder.contours) {
-            const double area = contour.SignedArea();
-            if (std::abs(area) > dominant_area) {
-              dominant_area = std::abs(area);
-              dominant_sign = area < 0.0 ? -1 : 1;
-            }
-          }
-
-          for (const OutlineSvgBuilder::Contour &contour : builder.contours) {
-            if (contour.samples.size() < 3) {
-              continue;
-            }
-            const double area = contour.SignedArea();
-            const int contour_sign = area < 0.0 ? -1 : 1;
-            const unsigned int contour_marker =
-                dominant_area > 0.0 && contour_sign != dominant_sign
-                    ? kDxfHoleTextColor
-                    : marker_color;
-            body << "<path d=\"" << contour.path.str() << "\" stroke=\""
-                 << stroke_color << "\" stroke-width=\"1\" fill=\""
-                 << SvgHexColor(contour_marker) << "\" fill-opacity=\"0\" />\n";
-            emitted_any = true;
-          }
-        }
-      }
-    }
-    pen_x_units += static_cast<double>(face_->glyph->advance.x);
-    previous_glyph = glyph_index;
-  }
-  return emitted_any;
-}
-
-bool VectorGlyphFont::AppendTextSvg(
-    const std::string &text, double anchor_x, double anchor_y, double height,
-    double widthscale, double angle_degrees,
-    HorizontalTextAlignment horizontal_alignment,
-    VerticalTextAlignment vertical_alignment, double line_spacing_factor,
-    std::string_view stroke_color, unsigned int marker_color,
-    std::ostringstream &body,
-    const std::function<void(double, double)> &update_bounds) {
-  if (!available() || text.empty()) {
-    return false;
-  }
-  const std::vector<std::string> line_text = SplitTextLines(text);
-  if (line_text.empty()) {
-    return false;
-  }
-  std::vector<std::vector<uint32_t>> lines;
-  lines.reserve(line_text.size());
-  for (const std::string &line : line_text) {
-    lines.push_back(DecodeUtf8(line));
-  }
-  const double units_per_em = std::max<double>(face_->units_per_EM, 1.0);
-  const double scale = height / units_per_em;
-  const double effective_widthscale = std::max(widthscale, 0.1);
-  const double ascender = face_->ascender * scale;
-  const double descender = face_->descender * scale;
-  const double raw_line_height_units =
-      face_->height > 0
-          ? static_cast<double>(face_->height)
-          : static_cast<double>(face_->ascender - face_->descender);
-  const double line_height = std::max(raw_line_height_units * scale *
-                                          std::max(line_spacing_factor, 1.0),
-                                      height);
-  const double block_top = ascender;
-  const double block_bottom =
-      descender - line_height * static_cast<double>(lines.size() - 1);
-  double baseline_shift = 0.0;
-  switch (vertical_alignment) {
-  case VerticalTextAlignment::Baseline:
-    baseline_shift = 0.0;
-    break;
-  case VerticalTextAlignment::Bottom:
-    baseline_shift = -block_bottom;
-    break;
-  case VerticalTextAlignment::Middle:
-    baseline_shift = -(block_top + block_bottom) * 0.5;
-    break;
-  case VerticalTextAlignment::Top:
-    baseline_shift = -block_top;
-    break;
-  }
-  const double radians = angle_degrees * kPi / 180.0;
-  const double cosine = std::cos(radians);
-  const double sine = std::sin(radians);
-  bool emitted_any = false;
-  for (size_t line_index = 0; line_index < lines.size(); ++line_index) {
-    const double line_width =
-        MeasureLineUnits(lines[line_index]) * scale * effective_widthscale;
-    double line_offset_x = 0.0;
-    switch (horizontal_alignment) {
-    case HorizontalTextAlignment::Left:
-      break;
-    case HorizontalTextAlignment::Center:
-      line_offset_x = -line_width * 0.5;
-      break;
-    case HorizontalTextAlignment::Right:
-      line_offset_x = -line_width;
-      break;
-    }
-    emitted_any |= AppendLineSvg(
-        lines[line_index], anchor_x, anchor_y, scale, effective_widthscale,
-        line_offset_x,
-        baseline_shift - line_height * static_cast<double>(line_index), cosine,
-        sine, stroke_color, marker_color, body, update_bounds);
   }
   return emitted_any;
 }

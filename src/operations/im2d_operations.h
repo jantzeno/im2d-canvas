@@ -20,9 +20,6 @@ ImportedArtworkOperationResult
 UpdateImportedArtworkOutlineColor(CanvasState &state, int imported_artwork_id,
                                   const ImVec4 &stroke_color);
 ImportedArtworkOperationResult
-PrepareImportedArtworkForCutting(CanvasState &state, int imported_artwork_id,
-                                 float weld_tolerance = 0.5f);
-ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,

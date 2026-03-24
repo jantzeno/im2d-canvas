@@ -262,7 +262,12 @@ inline ImportedArtworkOperationResult PrepareImportedArtworkForCuttingShared(
 
   result.success = true;
   populate_fn(&result, *artwork);
-  result.message = "Prepared imported artwork: stitched " +
+  const char *mode_label =
+      result.prepare_mode == ImportedArtworkPrepareMode::AggressiveCleanup
+          ? "Prepare + Weld Cleanup"
+          : "Prepare For Cutting";
+  result.message = std::string(mode_label) + ": preserved " +
+                   std::to_string(result.preserved_count) + ", stitched " +
                    std::to_string(result.stitched_count) + ", cleaned " +
                    std::to_string(result.cleaned_count) + ", closed " +
                    std::to_string(result.closed_count) + ", open " +

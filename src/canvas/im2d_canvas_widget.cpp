@@ -16,6 +16,10 @@ namespace im2d {
 
 namespace {
 
+constexpr float kImportedPreviewStrokeWidth = 1.0f;
+constexpr float kImportedPreviewCurveFlatnessPixels = 0.35f;
+constexpr int kImportedPreviewCurveMaxSubdivisionDepth = 10;
+
 enum class WorkingAreaHitZone {
   None,
   Body,
@@ -361,6 +365,134 @@ ImVec2 CubicBezierPoint(const ImVec2 &start, const ImVec2 &control1,
                     3.0f * mt * t2 * control2.y + t2 * t * end.y);
 }
 
+float DistancePointToLineSquared(const ImVec2 &point, const ImVec2 &line_start,
+                                 const ImVec2 &line_end) {
+  const float dx = line_end.x - line_start.x;
+  const float dy = line_end.y - line_start.y;
+  const float line_length_squared = dx * dx + dy * dy;
+  if (line_length_squared <= 0.000001f) {
+    const float px = point.x - line_start.x;
+    const float py = point.y - line_start.y;
+    return px * px + py * py;
+  }
+
+  const float numerator =
+      std::fabs(dy * point.x - dx * point.y + line_end.x * line_start.y -
+                line_end.y * line_start.x);
+  return (numerator * numerator) / line_length_squared;
+}
+
+bool ImportedPreviewCurveFlatEnough(const ImVec2 &start, const ImVec2 &control1,
+                                    const ImVec2 &control2, const ImVec2 &end) {
+  const float tolerance_squared =
+      kImportedPreviewCurveFlatnessPixels * kImportedPreviewCurveFlatnessPixels;
+  return DistancePointToLineSquared(control1, start, end) <=
+             tolerance_squared &&
+         DistancePointToLineSquared(control2, start, end) <= tolerance_squared;
+}
+
+bool PreviewPointsNear(const ImVec2 &a, const ImVec2 &b,
+                       float tolerance = 0.1f) {
+  const float dx = a.x - b.x;
+  const float dy = a.y - b.y;
+  return dx * dx + dy * dy <= tolerance * tolerance;
+}
+
+void AppendPreviewPathPoint(std::vector<ImVec2> *points, const ImVec2 &point) {
+  if (points == nullptr) {
+    return;
+  }
+  if (!points->empty() && PreviewPointsNear(points->back(), point)) {
+    return;
+  }
+  points->push_back(point);
+}
+
+void AppendAdaptiveImportedPreviewCurvePoints(std::vector<ImVec2> *points,
+                                              const ImVec2 &start,
+                                              const ImVec2 &control1,
+                                              const ImVec2 &control2,
+                                              const ImVec2 &end, int depth) {
+  if (depth >= kImportedPreviewCurveMaxSubdivisionDepth ||
+      ImportedPreviewCurveFlatEnough(start, control1, control2, end)) {
+    AppendPreviewPathPoint(points, end);
+    return;
+  }
+
+  const ImVec2 start_control1_mid((start.x + control1.x) * 0.5f,
+                                  (start.y + control1.y) * 0.5f);
+  const ImVec2 control1_control2_mid((control1.x + control2.x) * 0.5f,
+                                     (control1.y + control2.y) * 0.5f);
+  const ImVec2 control2_end_mid((control2.x + end.x) * 0.5f,
+                                (control2.y + end.y) * 0.5f);
+  const ImVec2 left_control2(
+      (start_control1_mid.x + control1_control2_mid.x) * 0.5f,
+      (start_control1_mid.y + control1_control2_mid.y) * 0.5f);
+  const ImVec2 right_control1(
+      (control1_control2_mid.x + control2_end_mid.x) * 0.5f,
+      (control1_control2_mid.y + control2_end_mid.y) * 0.5f);
+  const ImVec2 split_point((left_control2.x + right_control1.x) * 0.5f,
+                           (left_control2.y + right_control1.y) * 0.5f);
+
+  AppendAdaptiveImportedPreviewCurvePoints(
+      points, start, start_control1_mid, left_control2, split_point, depth + 1);
+  AppendAdaptiveImportedPreviewCurvePoints(points, split_point, right_control1,
+                                           control2_end_mid, end, depth + 1);
+}
+
+void AppendImportedSegmentPath(ImDrawList *draw_list, const CanvasState &state,
+                               const ImRect &canvas_rect,
+                               const ImportedArtwork &artwork,
+                               const std::vector<ImportedPathSegment> &segments,
+                               bool closed) {
+  if (segments.empty()) {
+    return;
+  }
+
+  std::vector<ImVec2> screen_points;
+  screen_points.reserve(segments.size() * 4);
+  const ImVec2 first_world =
+      ImportedArtworkPointToWorld(artwork, segments.front().start);
+  AppendPreviewPathPoint(&screen_points,
+                         WorldToScreen(state, canvas_rect.Min, first_world));
+
+  for (const ImportedPathSegment &segment : segments) {
+    if (segment.kind == ImportedPathSegmentKind::Line) {
+      const ImVec2 end_world =
+          ImportedArtworkPointToWorld(artwork, segment.end);
+      AppendPreviewPathPoint(&screen_points,
+                             WorldToScreen(state, canvas_rect.Min, end_world));
+      continue;
+    }
+
+    const ImVec2 start_screen =
+        WorldToScreen(state, canvas_rect.Min,
+                      ImportedArtworkPointToWorld(artwork, segment.start));
+    const ImVec2 control1_screen =
+        WorldToScreen(state, canvas_rect.Min,
+                      ImportedArtworkPointToWorld(artwork, segment.control1));
+    const ImVec2 control2_screen =
+        WorldToScreen(state, canvas_rect.Min,
+                      ImportedArtworkPointToWorld(artwork, segment.control2));
+    const ImVec2 end_screen =
+        WorldToScreen(state, canvas_rect.Min,
+                      ImportedArtworkPointToWorld(artwork, segment.end));
+    AppendAdaptiveImportedPreviewCurvePoints(&screen_points, start_screen,
+                                             control1_screen, control2_screen,
+                                             end_screen, 0);
+  }
+
+  if (closed && screen_points.size() > 1 &&
+      PreviewPointsNear(screen_points.front(), screen_points.back())) {
+    screen_points.pop_back();
+  }
+
+  draw_list->PathClear();
+  for (const ImVec2 &point : screen_points) {
+    draw_list->PathLineTo(point);
+  }
+}
+
 void FlattenImportedTextContour(const ImportedTextContour &contour,
                                 std::vector<ImVec2> *points) {
   points->clear();
@@ -555,30 +687,8 @@ void AppendImportedTextContourPath(ImDrawList *draw_list,
                                    const ImRect &canvas_rect,
                                    const ImportedArtwork &artwork,
                                    const ImportedTextContour &contour) {
-  if (contour.segments.empty()) {
-    return;
-  }
-
-  draw_list->PathClear();
-  const ImVec2 first_world =
-      ImportedArtworkPointToWorld(artwork, contour.segments.front().start);
-  draw_list->PathLineTo(WorldToScreen(state, canvas_rect.Min, first_world));
-  for (const ImportedPathSegment &segment : contour.segments) {
-    const ImVec2 end_world = ImportedArtworkPointToWorld(artwork, segment.end);
-    if (segment.kind == ImportedPathSegmentKind::Line) {
-      draw_list->PathLineTo(WorldToScreen(state, canvas_rect.Min, end_world));
-      continue;
-    }
-
-    const ImVec2 control1_world =
-        ImportedArtworkPointToWorld(artwork, segment.control1);
-    const ImVec2 control2_world =
-        ImportedArtworkPointToWorld(artwork, segment.control2);
-    draw_list->PathBezierCubicCurveTo(
-        WorldToScreen(state, canvas_rect.Min, control1_world),
-        WorldToScreen(state, canvas_rect.Min, control2_world),
-        WorldToScreen(state, canvas_rect.Min, end_world));
-  }
+  AppendImportedSegmentPath(draw_list, state, canvas_rect, artwork,
+                            contour.segments, contour.closed);
 }
 
 void DrawImportedDxfText(ImDrawList *draw_list, const CanvasState &state,
@@ -586,9 +696,7 @@ void DrawImportedDxfText(ImDrawList *draw_list, const CanvasState &state,
                          const ImportedArtwork &artwork,
                          const ImportedDxfText &text) {
   const ImU32 packed_color = ImGui::ColorConvertFloat4ToU32(text.stroke_color);
-  const float outline_thickness =
-      text.placeholder_only ? std::max(1.0f, text.stroke_width)
-                            : std::max(1.0f, text.stroke_width * 0.35f);
+  const float outline_thickness = kImportedPreviewStrokeWidth;
 
   if (!text.placeholder_only) {
     for (const ImportedTextGlyph &glyph : text.glyphs) {
@@ -770,49 +878,16 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
         continue;
       }
 
-      if (artwork.source_format == "DXF" && !state.show_imported_dxf_text &&
-          HasImportedPathFlag(path.flags, ImportedPathFlagTextPlaceholder)) {
-        continue;
-      }
-
       const auto append_path = [&]() {
-        draw_list->PathClear();
-        const ImVec2 first_world = ::im2d::ImportedArtworkPointToWorld(
-            artwork, path.segments.front().start);
-        draw_list->PathLineTo(
-            WorldToScreen(state, canvas_rect.Min, first_world));
-
-        for (const ImportedPathSegment &segment : path.segments) {
-          const ImVec2 end_world =
-              ::im2d::ImportedArtworkPointToWorld(artwork, segment.end);
-          if (segment.kind == ImportedPathSegmentKind::Line) {
-            draw_list->PathLineTo(
-                WorldToScreen(state, canvas_rect.Min, end_world));
-            continue;
-          }
-
-          const ImVec2 control1_world =
-              ::im2d::ImportedArtworkPointToWorld(artwork, segment.control1);
-          const ImVec2 control2_world =
-              ::im2d::ImportedArtworkPointToWorld(artwork, segment.control2);
-          draw_list->PathBezierCubicCurveTo(
-              WorldToScreen(state, canvas_rect.Min, control1_world),
-              WorldToScreen(state, canvas_rect.Min, control2_world),
-              WorldToScreen(state, canvas_rect.Min, end_world));
-        }
+        AppendImportedSegmentPath(draw_list, state, canvas_rect, artwork,
+                                  path.segments, path.closed);
       };
 
-      const bool is_dxf_artwork = artwork.source_format == "DXF";
       const bool is_filled_text =
           HasImportedPathFlag(path.flags, ImportedPathFlagFilledText);
       const bool is_hole_contour =
           HasImportedPathFlag(path.flags, ImportedPathFlagHoleContour);
-      const float average_scale = (artwork.scale.x + artwork.scale.y) * 0.5f;
-      const float thickness =
-          is_dxf_artwork ? std::max(1.0f, path.stroke_width)
-                         : std::max(1.0f, path.stroke_width *
-                                              std::max(average_scale, 0.1f) *
-                                              state.view.zoom);
+      const float thickness = kImportedPreviewStrokeWidth;
       const ImU32 packed_color =
           ImGui::ColorConvertFloat4ToU32(path.stroke_color);
       const ImU32 background_color =
@@ -1485,6 +1560,12 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         artwork != nullptr) {
       if (ImGui::MenuItem("Prepare For Cutting")) {
         PrepareImportedArtworkForCutting(state, artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Prepare + Weld Cleanup")) {
+        PrepareImportedArtworkForCutting(
+            state, artwork->id, 0.5f,
+            ImportedArtworkPrepareMode::AggressiveCleanup);
         ImGui::CloseCurrentPopup();
       }
       if (!state.selected_imported_elements.empty() &&
