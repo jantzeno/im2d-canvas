@@ -49,6 +49,11 @@ struct PrepareWorkflowUiState {
   bool auto_close_before_prepare = false;
 };
 
+struct AutoCutPreviewUiState {
+  im2d::AutoCutPreviewAxisMode axis_mode = im2d::AutoCutPreviewAxisMode::Both;
+  float minimum_gap = 5.0f;
+};
+
 SvgExportUiState &GetSvgExportUiState() {
   static SvgExportUiState state;
   return state;
@@ -59,10 +64,32 @@ PrepareWorkflowUiState &GetPrepareWorkflowUiState() {
   return state;
 }
 
+AutoCutPreviewUiState &GetAutoCutPreviewUiState() {
+  static AutoCutPreviewUiState state;
+  return state;
+}
+
 bool HasActiveSeparationPreview(const im2d::CanvasState &state,
                                 int artwork_id) {
   return state.imported_artwork_separation_preview.active &&
          state.imported_artwork_separation_preview.artwork_id == artwork_id;
+}
+
+bool HasActiveAutoCutPreview(const im2d::CanvasState &state, int artwork_id) {
+  return state.imported_artwork_auto_cut_preview.active &&
+         state.imported_artwork_auto_cut_preview.artwork_id == artwork_id;
+}
+
+const char *AutoCutAxisModeLabel(im2d::AutoCutPreviewAxisMode axis_mode) {
+  switch (axis_mode) {
+  case im2d::AutoCutPreviewAxisMode::VerticalOnly:
+    return "Vertical Only";
+  case im2d::AutoCutPreviewAxisMode::HorizontalOnly:
+    return "Horizontal Only";
+  case im2d::AutoCutPreviewAxisMode::Both:
+    return "Both Axes";
+  }
+  return "Both Axes";
 }
 
 int GetPreviewAnchorGuideId(const im2d::CanvasState &state, int artwork_id) {
@@ -113,6 +140,16 @@ void DrawPreviewAnchorGuideSelector(im2d::CanvasState &state,
 
 int CountPreviewPartsByClassification(
     const im2d::ImportedArtworkSeparationPreview &preview,
+    im2d::ImportedSeparationPreviewClassification classification) {
+  return static_cast<int>(std::count_if(
+      preview.parts.begin(), preview.parts.end(),
+      [classification](const im2d::ImportedSeparationPreviewPart &part) {
+        return part.classification == classification;
+      }));
+}
+
+int CountPreviewPartsByClassification(
+    const im2d::ImportedArtworkAutoCutPreview &preview,
     im2d::ImportedSeparationPreviewClassification classification) {
   return static_cast<int>(std::count_if(
       preview.parts.begin(), preview.parts.end(),
@@ -1405,6 +1442,70 @@ void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
   if (ImGui::Button("Prepare + Weld Cleanup")) {
     QueuePrepareForCuttingDialog(
         *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::AggressiveCleanup);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Auto Cut Preview");
+  ImGui::TextWrapped(
+      "Infer temporary cut bands from the selected artwork bounds and show the "
+      "same overlay style as the guide-band preview.");
+  AutoCutPreviewUiState &auto_cut_preview = GetAutoCutPreviewUiState();
+  if (ImGui::BeginCombo("Axis Mode",
+                        AutoCutAxisModeLabel(auto_cut_preview.axis_mode))) {
+    constexpr im2d::AutoCutPreviewAxisMode kAxisModes[] = {
+        im2d::AutoCutPreviewAxisMode::VerticalOnly,
+        im2d::AutoCutPreviewAxisMode::HorizontalOnly,
+        im2d::AutoCutPreviewAxisMode::Both};
+    for (im2d::AutoCutPreviewAxisMode axis_mode : kAxisModes) {
+      const bool selected = auto_cut_preview.axis_mode == axis_mode;
+      if (ImGui::Selectable(AutoCutAxisModeLabel(axis_mode), selected)) {
+        auto_cut_preview.axis_mode = axis_mode;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+  ImGui::SetNextItemWidth(140.0f);
+  ImGui::DragFloat("Minimum Gap", &auto_cut_preview.minimum_gap, 0.25f, 0.25f,
+                   1000.0f, "%.2f");
+  if (ImGui::Button("Preview Auto Cut")) {
+    im2d::PreviewImportedArtworkAutoCut(state, artwork->id,
+                                        auto_cut_preview.axis_mode,
+                                        auto_cut_preview.minimum_gap);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear Auto Cut Preview")) {
+    im2d::ClearImportedArtworkAutoCutPreview(state);
+  }
+
+  const bool has_auto_cut_preview = HasActiveAutoCutPreview(state, artwork->id);
+  if (has_auto_cut_preview) {
+    ImGui::Separator();
+    const im2d::ImportedArtworkAutoCutPreview &preview =
+        state.imported_artwork_auto_cut_preview;
+    const int assigned_count = CountPreviewPartsByClassification(
+        preview, im2d::ImportedSeparationPreviewClassification::Assigned);
+    const int crossing_count = CountPreviewPartsByClassification(
+        preview, im2d::ImportedSeparationPreviewClassification::Crossing);
+    const int orphan_count = CountPreviewPartsByClassification(
+        preview, im2d::ImportedSeparationPreviewClassification::Orphan);
+    ImGui::TextUnformatted("Auto Cut Preview");
+    ImGui::Text("Axis Mode: %s", AutoCutAxisModeLabel(preview.axis_mode));
+    ImGui::Text("Minimum Gap: %.2f", preview.minimum_gap);
+    ImGui::Text("Vertical Cuts: %d",
+                static_cast<int>(preview.vertical_positions.size()));
+    ImGui::Text("Horizontal Cuts: %d",
+                static_cast<int>(preview.horizontal_positions.size()));
+    ImGui::Text("Bands: %d", preview.future_band_count);
+    ImGui::Text("Skipped: %d", preview.skipped_count);
+    ImGui::Text("Assigned Parts: %d", assigned_count);
+    ImGui::Text("Crossing Parts: %d", crossing_count);
+    ImGui::Text("Orphan Parts: %d", orphan_count);
+    if (!preview.message.empty()) {
+      ImGui::TextWrapped("%s", preview.message.c_str());
+    }
   }
 
   ImGui::Separator();

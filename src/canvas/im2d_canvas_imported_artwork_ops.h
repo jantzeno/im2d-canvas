@@ -27,6 +27,11 @@ ImportedArtworkOperationResult
 PreviewSeparateImportedArtworkByGuide(CanvasState &state,
                                       int imported_artwork_id, int guide_id);
 void ClearImportedArtworkSeparationPreview(CanvasState &state);
+ImportedArtworkOperationResult PreviewImportedArtworkAutoCut(
+    CanvasState &state, int imported_artwork_id,
+    AutoCutPreviewAxisMode axis_mode = AutoCutPreviewAxisMode::Both,
+    float minimum_gap = 5.0f);
+void ClearImportedArtworkAutoCutPreview(CanvasState &state);
 ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult

@@ -212,6 +212,13 @@ struct PreviewOverlayColors {
   ImU32 fill = 0;
 };
 
+struct PreviewBucketRegion {
+  int bucket_index = -1;
+  int bucket_column = 0;
+  int bucket_row = 0;
+  PreviewOverlayColors colors;
+};
+
 PreviewOverlayColors GetSeparationPreviewColors(
     ImportedSeparationPreviewClassification classification) {
   switch (classification) {
@@ -223,6 +230,163 @@ PreviewOverlayColors GetSeparationPreviewColors(
     return {IM_COL32(232, 84, 62, 235), IM_COL32(232, 84, 62, 44)};
   }
   return {IM_COL32(255, 255, 255, 255), IM_COL32(255, 255, 255, 32)};
+}
+
+std::vector<PreviewBucketRegion> BuildPreviewBucketRegions(
+    const std::vector<ImportedSeparationPreviewPart> &parts) {
+  std::vector<PreviewBucketRegion> bucket_regions;
+  for (const ImportedSeparationPreviewPart &part : parts) {
+    if (part.classification !=
+            ImportedSeparationPreviewClassification::Assigned ||
+        part.bucket_index < 0) {
+      continue;
+    }
+
+    const bool already_added =
+        std::any_of(bucket_regions.begin(), bucket_regions.end(),
+                    [&part](const PreviewBucketRegion &region) {
+                      return region.bucket_index == part.bucket_index;
+                    });
+    if (already_added) {
+      continue;
+    }
+
+    PreviewOverlayColors colors =
+        GetSeparationPreviewColors(part.classification);
+    constexpr ImU32 kBucketStrokes[] = {
+        IM_COL32(90, 160, 255, 235),  IM_COL32(92, 201, 110, 235),
+        IM_COL32(195, 120, 255, 235), IM_COL32(61, 201, 194, 235),
+        IM_COL32(255, 136, 92, 235),  IM_COL32(240, 210, 75, 235)};
+    constexpr ImU32 kBucketFills[] = {
+        IM_COL32(90, 160, 255, 28),  IM_COL32(92, 201, 110, 28),
+        IM_COL32(195, 120, 255, 28), IM_COL32(61, 201, 194, 28),
+        IM_COL32(255, 136, 92, 28),  IM_COL32(240, 210, 75, 28)};
+    const size_t palette_index =
+        static_cast<size_t>(part.bucket_index) % std::size(kBucketStrokes);
+    colors.stroke = kBucketStrokes[palette_index];
+    colors.fill = kBucketFills[palette_index];
+    bucket_regions.push_back(
+        {part.bucket_index, part.bucket_column, part.bucket_row, colors});
+  }
+  return bucket_regions;
+}
+
+const char *
+PreviewLabelForPart(ImportedSeparationPreviewClassification classification,
+                    int bucket_index, std::string *scratch_label) {
+  if (classification == ImportedSeparationPreviewClassification::Assigned) {
+    *scratch_label = "B" + std::to_string(bucket_index + 1);
+    return scratch_label->c_str();
+  }
+  if (classification == ImportedSeparationPreviewClassification::Crossing) {
+    return "Crossing";
+  }
+  return "Orphan";
+}
+
+void DrawBandPreviewOverlay(
+    ImDrawList *draw_list, const CanvasState &state, const ImRect &canvas_rect,
+    int artwork_id, const std::vector<float> &vertical_positions,
+    const std::vector<float> &horizontal_positions,
+    const std::vector<ImportedSeparationPreviewPart> &parts, const char *title,
+    const std::string &preview_summary) {
+  draw_list->PushClipRect(canvas_rect.Min, canvas_rect.Max, true);
+  const ImVec2 banner_min(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f);
+  const ImVec2 banner_max(canvas_rect.Min.x + 360.0f,
+                          canvas_rect.Min.y + 72.0f);
+  draw_list->AddRectFilled(banner_min, banner_max, IM_COL32(20, 24, 34, 224),
+                           6.0f);
+  draw_list->AddRect(banner_min, banner_max, IM_COL32(140, 170, 220, 220), 6.0f,
+                     0, 1.5f);
+  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 10.0f),
+                     IM_COL32(230, 236, 248, 255), title);
+  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 34.0f),
+                     IM_COL32(180, 196, 228, 255), preview_summary.c_str());
+
+  ImRect preview_artwork_rect = canvas_rect;
+  if (const ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id)) {
+    preview_artwork_rect =
+        ImportedArtworkScreenRect(state, canvas_rect.Min, *artwork);
+    preview_artwork_rect.ClipWith(canvas_rect);
+  }
+
+  const std::vector<PreviewBucketRegion> bucket_regions =
+      BuildPreviewBucketRegions(parts);
+  const ImVec2 visible_world_min =
+      ScreenToWorld(state, canvas_rect.Min, canvas_rect.Min);
+  const ImVec2 visible_world_max =
+      ScreenToWorld(state, canvas_rect.Min, canvas_rect.Max);
+
+  auto bucket_min_for = [](const std::vector<float> &positions, int index,
+                           float fallback_min) {
+    if (index <= 0 || positions.empty()) {
+      return fallback_min;
+    }
+    return positions[static_cast<size_t>(index - 1)];
+  };
+  auto bucket_max_for = [](const std::vector<float> &positions, int index,
+                           float fallback_max) {
+    if (positions.empty() || index >= static_cast<int>(positions.size())) {
+      return fallback_max;
+    }
+    return positions[static_cast<size_t>(index)];
+  };
+
+  for (const PreviewBucketRegion &region : bucket_regions) {
+    const float world_left = bucket_min_for(
+        vertical_positions, region.bucket_column, visible_world_min.x);
+    const float world_right = bucket_max_for(
+        vertical_positions, region.bucket_column, visible_world_max.x);
+    const float world_top = bucket_min_for(
+        horizontal_positions, region.bucket_row, visible_world_min.y);
+    const float world_bottom = bucket_max_for(
+        horizontal_positions, region.bucket_row, visible_world_max.y);
+    const ImRect band_screen_rect =
+        WorldRectToScreenRect(state, canvas_rect.Min,
+                              ImRect(ImVec2(world_left, world_top),
+                                     ImVec2(world_right, world_bottom)));
+    ImRect clipped_band_rect = band_screen_rect;
+    clipped_band_rect.ClipWith(preview_artwork_rect);
+    if (!clipped_band_rect.IsInverted()) {
+      draw_list->AddRectFilled(clipped_band_rect.Min, clipped_band_rect.Max,
+                               region.colors.fill);
+      draw_list->AddRect(clipped_band_rect.Min, clipped_band_rect.Max,
+                         region.colors.stroke, 0.0f, 0, 2.0f);
+
+      const std::string bucket_label =
+          "Band " + std::to_string(region.bucket_index + 1);
+      const ImVec2 label_pos(clipped_band_rect.Min.x + 10.0f,
+                             clipped_band_rect.Min.y + 10.0f);
+      draw_list->AddText(label_pos, region.colors.stroke, bucket_label.c_str());
+    }
+  }
+
+  std::string label_scratch;
+  for (const ImportedSeparationPreviewPart &part : parts) {
+    PreviewOverlayColors colors =
+        GetSeparationPreviewColors(part.classification);
+    if (part.classification ==
+        ImportedSeparationPreviewClassification::Assigned) {
+      continue;
+    }
+
+    const ImRect screen_rect = WorldRectToScreenRect(
+        state, canvas_rect.Min,
+        ImRect(part.world_bounds_min, part.world_bounds_max));
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max, colors.stroke, 4.0f, 0,
+                       3.0f);
+
+    const char *label = PreviewLabelForPart(part.classification,
+                                            part.bucket_index, &label_scratch);
+    const ImVec2 label_min(screen_rect.Min.x + 4.0f, screen_rect.Min.y + 4.0f);
+    const ImVec2 label_max(label_min.x + 72.0f, label_min.y + 20.0f);
+    draw_list->AddRectFilled(label_min, label_max, IM_COL32(16, 18, 26, 220),
+                             4.0f);
+    draw_list->AddRect(label_min, label_max, colors.stroke, 4.0f, 0, 1.5f);
+    draw_list->AddText(ImVec2(label_min.x + 6.0f, label_min.y + 3.0f),
+                       colors.stroke, label);
+  }
+  draw_list->PopClipRect();
 }
 
 bool TryGetImportedDebugScreenRect(const CanvasState &state,
@@ -531,30 +695,9 @@ void DrawSeparationPreviewOverlay(ImDrawList *draw_list,
     return;
   }
 
-  draw_list->PushClipRect(canvas_rect.Min, canvas_rect.Max, true);
-  const ImVec2 banner_min(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f);
-  const ImVec2 banner_max(canvas_rect.Min.x + 360.0f,
-                          canvas_rect.Min.y + 72.0f);
-  draw_list->AddRectFilled(banner_min, banner_max, IM_COL32(20, 24, 34, 224),
-                           6.0f);
-  draw_list->AddRect(banner_min, banner_max, IM_COL32(140, 170, 220, 220), 6.0f,
-                     0, 1.5f);
-  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 10.0f),
-                     IM_COL32(230, 236, 248, 255),
-                     "Guide Split Preview Active");
   const std::string preview_summary =
       std::to_string(preview.future_object_count) + " objects, " +
       std::to_string(preview.skipped_count) + " skipped";
-  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 34.0f),
-                     IM_COL32(180, 196, 228, 255), preview_summary.c_str());
-
-  ImRect preview_artwork_rect = canvas_rect;
-  if (const ImportedArtwork *artwork =
-          FindImportedArtwork(state, preview.artwork_id)) {
-    preview_artwork_rect =
-        ImportedArtworkScreenRect(state, canvas_rect.Min, *artwork);
-    preview_artwork_rect.ClipWith(canvas_rect);
-  }
 
   std::vector<float> vertical_positions;
   std::vector<float> horizontal_positions;
@@ -572,131 +715,27 @@ void DrawSeparationPreviewOverlay(ImDrawList *draw_list,
   std::sort(vertical_positions.begin(), vertical_positions.end());
   std::sort(horizontal_positions.begin(), horizontal_positions.end());
 
-  struct PreviewBucketRegion {
-    int bucket_index = -1;
-    int bucket_column = 0;
-    int bucket_row = 0;
-    PreviewOverlayColors colors;
-  };
+  DrawBandPreviewOverlay(draw_list, state, canvas_rect, preview.artwork_id,
+                         vertical_positions, horizontal_positions,
+                         preview.parts, "Guide Split Preview Active",
+                         preview_summary);
+}
 
-  std::vector<PreviewBucketRegion> bucket_regions;
-  for (const ImportedSeparationPreviewPart &part : preview.parts) {
-    if (part.classification !=
-            ImportedSeparationPreviewClassification::Assigned ||
-        part.bucket_index < 0) {
-      continue;
-    }
-
-    const bool already_added =
-        std::any_of(bucket_regions.begin(), bucket_regions.end(),
-                    [&part](const PreviewBucketRegion &region) {
-                      return region.bucket_index == part.bucket_index;
-                    });
-    if (already_added) {
-      continue;
-    }
-
-    PreviewOverlayColors colors =
-        GetSeparationPreviewColors(part.classification);
-    constexpr ImU32 kBucketStrokes[] = {
-        IM_COL32(90, 160, 255, 235),  IM_COL32(92, 201, 110, 235),
-        IM_COL32(195, 120, 255, 235), IM_COL32(61, 201, 194, 235),
-        IM_COL32(255, 136, 92, 235),  IM_COL32(240, 210, 75, 235)};
-    constexpr ImU32 kBucketFills[] = {
-        IM_COL32(90, 160, 255, 28),  IM_COL32(92, 201, 110, 28),
-        IM_COL32(195, 120, 255, 28), IM_COL32(61, 201, 194, 28),
-        IM_COL32(255, 136, 92, 28),  IM_COL32(240, 210, 75, 28)};
-    const size_t palette_index =
-        static_cast<size_t>(part.bucket_index) % std::size(kBucketStrokes);
-    colors.stroke = kBucketStrokes[palette_index];
-    colors.fill = kBucketFills[palette_index];
-    bucket_regions.push_back(
-        {part.bucket_index, part.bucket_column, part.bucket_row, colors});
+void DrawAutoCutPreviewOverlay(ImDrawList *draw_list, const CanvasState &state,
+                               const ImRect &canvas_rect) {
+  const ImportedArtworkAutoCutPreview &preview =
+      state.imported_artwork_auto_cut_preview;
+  if (!preview.active) {
+    return;
   }
 
-  const ImVec2 visible_world_min =
-      ScreenToWorld(state, canvas_rect.Min, canvas_rect.Min);
-  const ImVec2 visible_world_max =
-      ScreenToWorld(state, canvas_rect.Min, canvas_rect.Max);
-
-  auto bucket_min_for = [](const std::vector<float> &positions, int index,
-                           float fallback_min) {
-    if (index <= 0 || positions.empty()) {
-      return fallback_min;
-    }
-    return positions[static_cast<size_t>(index - 1)];
-  };
-  auto bucket_max_for = [](const std::vector<float> &positions, int index,
-                           float fallback_max) {
-    if (positions.empty() || index >= static_cast<int>(positions.size())) {
-      return fallback_max;
-    }
-    return positions[static_cast<size_t>(index)];
-  };
-
-  for (const PreviewBucketRegion &region : bucket_regions) {
-    const float world_left = bucket_min_for(
-        vertical_positions, region.bucket_column, visible_world_min.x);
-    const float world_right = bucket_max_for(
-        vertical_positions, region.bucket_column, visible_world_max.x);
-    const float world_top = bucket_min_for(
-        horizontal_positions, region.bucket_row, visible_world_min.y);
-    const float world_bottom = bucket_max_for(
-        horizontal_positions, region.bucket_row, visible_world_max.y);
-    const ImRect band_screen_rect =
-        WorldRectToScreenRect(state, canvas_rect.Min,
-                              ImRect(ImVec2(world_left, world_top),
-                                     ImVec2(world_right, world_bottom)));
-    ImRect clipped_band_rect = band_screen_rect;
-    clipped_band_rect.ClipWith(preview_artwork_rect);
-    if (!clipped_band_rect.IsInverted()) {
-      draw_list->AddRectFilled(clipped_band_rect.Min, clipped_band_rect.Max,
-                               region.colors.fill);
-      draw_list->AddRect(clipped_band_rect.Min, clipped_band_rect.Max,
-                         region.colors.stroke, 0.0f, 0, 2.0f);
-
-      const std::string bucket_label =
-          "Band " + std::to_string(region.bucket_index + 1);
-      const ImVec2 label_pos(clipped_band_rect.Min.x + 10.0f,
-                             clipped_band_rect.Min.y + 10.0f);
-      draw_list->AddText(label_pos, region.colors.stroke, bucket_label.c_str());
-    }
-  }
-
-  for (const ImportedSeparationPreviewPart &part : preview.parts) {
-    PreviewOverlayColors colors =
-        GetSeparationPreviewColors(part.classification);
-    if (part.classification ==
-        ImportedSeparationPreviewClassification::Assigned) {
-      continue;
-    }
-
-    const ImRect screen_rect = WorldRectToScreenRect(
-        state, canvas_rect.Min,
-        ImRect(part.world_bounds_min, part.world_bounds_max));
-    draw_list->AddRect(screen_rect.Min, screen_rect.Max, colors.stroke, 4.0f, 0,
-                       3.0f);
-
-    std::string label;
-    if (part.classification ==
-        ImportedSeparationPreviewClassification::Assigned) {
-      label = "B" + std::to_string(part.bucket_index + 1);
-    } else if (part.classification ==
-               ImportedSeparationPreviewClassification::Crossing) {
-      label = "Crossing";
-    } else {
-      label = "Orphan";
-    }
-
-    const ImVec2 label_min(screen_rect.Min.x + 4.0f, screen_rect.Min.y + 4.0f);
-    const ImVec2 label_max(label_min.x + 72.0f, label_min.y + 20.0f);
-    draw_list->AddRectFilled(label_min, label_max, IM_COL32(16, 18, 26, 220),
-                             4.0f);
-    draw_list->AddRect(label_min, label_max, colors.stroke, 4.0f, 0, 1.5f);
-    draw_list->AddText(ImVec2(label_min.x + 6.0f, label_min.y + 3.0f),
-                       colors.stroke, label.c_str());
-  }
-  draw_list->PopClipRect();
+  const std::string preview_summary =
+      std::to_string(preview.future_band_count) + " bands, " +
+      std::to_string(preview.skipped_count) + " skipped";
+  DrawBandPreviewOverlay(draw_list, state, canvas_rect, preview.artwork_id,
+                         preview.vertical_positions,
+                         preview.horizontal_positions, preview.parts,
+                         "Auto Cut Preview Active", preview_summary);
 }
 
 void RemoveGuide(CanvasState &state, int guide_id) {
@@ -1926,6 +1965,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   DrawImportedArtwork(draw_list, state, canvas_rect,
                       state.selected_imported_artwork_id, options);
   DrawSeparationPreviewOverlay(draw_list, state, canvas_rect);
+  DrawAutoCutPreviewOverlay(draw_list, state, canvas_rect);
   DrawGuides(draw_list, state, canvas_rect, hovered_guide_id, transient_state);
   DrawImportedMarquee(draw_list, state, canvas_rect, transient_state);
   DrawRulerAxis(draw_list, state, top_ruler_rect, true);

@@ -436,6 +436,18 @@ void ClearImportedArtworkSeparationPreview(CanvasState &state) {
 }
 
 ImportedArtworkOperationResult
+PreviewImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
+                              AutoCutPreviewAxisMode axis_mode,
+                              float minimum_gap) {
+  return im2d::PreviewImportedArtworkAutoCut(state, imported_artwork_id,
+                                             axis_mode, minimum_gap);
+}
+
+void ClearImportedArtworkAutoCutPreview(CanvasState &state) {
+  im2d::ClearImportedArtworkAutoCutPreview(state);
+}
+
+ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
                                int guide_id) {
   return im2d::SeparateImportedArtworkByGuide(state, imported_artwork_id,

@@ -205,6 +205,12 @@ enum class ImportedSeparationPreviewClassification {
   Orphan,
 };
 
+enum class AutoCutPreviewAxisMode {
+  VerticalOnly,
+  HorizontalOnly,
+  Both,
+};
+
 struct ImportedSeparationPreviewPart {
   ImportedSeparationPreviewClassification classification =
       ImportedSeparationPreviewClassification::Assigned;
@@ -222,6 +228,20 @@ struct ImportedArtworkSeparationPreview {
   int guide_id = 0;
   std::vector<int> guide_ids;
   int future_object_count = 0;
+  int skipped_count = 0;
+  std::vector<ImportedElementSelection> skipped_elements;
+  std::vector<ImportedSeparationPreviewPart> parts;
+  std::string message;
+};
+
+struct ImportedArtworkAutoCutPreview {
+  bool active = false;
+  int artwork_id = 0;
+  AutoCutPreviewAxisMode axis_mode = AutoCutPreviewAxisMode::Both;
+  float minimum_gap = 5.0f;
+  std::vector<float> vertical_positions;
+  std::vector<float> horizontal_positions;
+  int future_band_count = 0;
   int skipped_count = 0;
   std::vector<ImportedElementSelection> skipped_elements;
   std::vector<ImportedSeparationPreviewPart> parts;
@@ -441,6 +461,7 @@ struct CanvasState {
       ImportedArtworkEditMode::None;
   std::vector<ImportedElementSelection> selected_imported_elements;
   ImportedArtworkSeparationPreview imported_artwork_separation_preview;
+  ImportedArtworkAutoCutPreview imported_artwork_auto_cut_preview;
   ImportedArtworkOperationResult last_imported_artwork_operation;
   int last_imported_operation_issue_artwork_id = 0;
   std::vector<ImportedElementSelection> last_imported_operation_issue_elements;

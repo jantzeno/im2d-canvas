@@ -230,6 +230,11 @@ inline bool DeleteImportedArtworkShared(CanvasState &state,
           imported_artwork_id) {
     state.imported_artwork_separation_preview = {};
   }
+  if (state.imported_artwork_auto_cut_preview.active &&
+      state.imported_artwork_auto_cut_preview.artwork_id ==
+          imported_artwork_id) {
+    state.imported_artwork_auto_cut_preview = {};
+  }
   if (state.selected_imported_artwork_id == imported_artwork_id) {
     state.selected_imported_artwork_id = 0;
     im2d::ClearSelectedImportedElements(state);

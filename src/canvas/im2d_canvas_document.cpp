@@ -548,6 +548,7 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
 void ClearImportedArtwork(CanvasState &state) {
   state.imported_artwork.clear();
   state.imported_artwork_separation_preview = {};
+  state.imported_artwork_auto_cut_preview = {};
   state.selected_imported_artwork_id = 0;
   ClearImportedDebugSelection(state);
   ClearSelectedImportedElements(state);

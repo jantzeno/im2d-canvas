@@ -59,6 +59,22 @@ void ClearImportedArtworkSeparationPreviewState(CanvasState &state) {
   state.imported_artwork_separation_preview = {};
 }
 
+void ClearImportedArtworkAutoCutPreviewState(CanvasState &state) {
+  state.imported_artwork_auto_cut_preview = {};
+}
+
+void ClearImportedArtworkPreviewStatesForArtwork(CanvasState &state,
+                                                 int artwork_id) {
+  if (state.imported_artwork_separation_preview.active &&
+      state.imported_artwork_separation_preview.artwork_id == artwork_id) {
+    ClearImportedArtworkSeparationPreviewState(state);
+  }
+  if (state.imported_artwork_auto_cut_preview.active &&
+      state.imported_artwork_auto_cut_preview.artwork_id == artwork_id) {
+    ClearImportedArtworkAutoCutPreviewState(state);
+  }
+}
+
 void PopulateOperationReadiness(ImportedArtworkOperationResult *result,
                                 const ImportedArtwork &artwork) {
   result->part_id = artwork.part.part_id;
@@ -305,6 +321,28 @@ struct GuideBandLayout {
   std::vector<float> horizontal_positions;
 };
 
+struct AutoCutPreviewPlan {
+  struct BucketAssignment {
+    int bucket_index = -1;
+    int bucket_column = 0;
+    int bucket_row = 0;
+    std::unordered_set<int> path_ids;
+    std::unordered_set<int> text_ids;
+  };
+
+  GuideBandLayout layout;
+  std::vector<BucketAssignment> buckets;
+  std::vector<ImportedElementSelection> skipped_elements;
+  std::vector<ImportedSeparationPreviewPart> preview_parts;
+};
+
+struct LogicalPartPreviewBounds {
+  const GuideSplitLogicalPart *logical_part = nullptr;
+  ImVec2 world_bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 world_bounds_max = ImVec2(0.0f, 0.0f);
+  bool has_bounds = false;
+};
+
 ImVec2 MinPoint(const ImVec2 &a, const ImVec2 &b) {
   return ImVec2(std::min(a.x, b.x), std::min(a.y, b.y));
 }
@@ -430,6 +468,242 @@ std::vector<GuideSplitLogicalPart> BuildGuideSplitLogicalParts(
   }
 
   return parts;
+}
+
+bool AutoCutAxisModeIncludesVertical(AutoCutPreviewAxisMode axis_mode) {
+  return axis_mode == AutoCutPreviewAxisMode::VerticalOnly ||
+         axis_mode == AutoCutPreviewAxisMode::Both;
+}
+
+bool AutoCutAxisModeIncludesHorizontal(AutoCutPreviewAxisMode axis_mode) {
+  return axis_mode == AutoCutPreviewAxisMode::HorizontalOnly ||
+         axis_mode == AutoCutPreviewAxisMode::Both;
+}
+
+float NormalizeAutoCutMinimumGap(float minimum_gap) {
+  return std::max(minimum_gap,
+                  operations::detail::kSharedGuideClassificationEpsilon);
+}
+
+std::vector<LogicalPartPreviewBounds> BuildLogicalPartPreviewBounds(
+    const std::vector<GuideSplitLogicalPart> &logical_parts) {
+  std::vector<LogicalPartPreviewBounds> bounds;
+  bounds.reserve(logical_parts.size());
+
+  for (const GuideSplitLogicalPart &part : logical_parts) {
+    LogicalPartPreviewBounds preview_bounds;
+    preview_bounds.logical_part = &part;
+    preview_bounds.world_bounds_min = ImVec2(std::numeric_limits<float>::max(),
+                                             std::numeric_limits<float>::max());
+    preview_bounds.world_bounds_max = ImVec2(
+        -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+
+    for (const ImVec2 &point : part.sample_points) {
+      preview_bounds.world_bounds_min =
+          MinPoint(preview_bounds.world_bounds_min, point);
+      preview_bounds.world_bounds_max =
+          MaxPoint(preview_bounds.world_bounds_max, point);
+      preview_bounds.has_bounds = true;
+    }
+
+    if (!preview_bounds.has_bounds) {
+      preview_bounds.world_bounds_min = ImVec2(0.0f, 0.0f);
+      preview_bounds.world_bounds_max = ImVec2(0.0f, 0.0f);
+    }
+    bounds.push_back(preview_bounds);
+  }
+
+  return bounds;
+}
+
+std::vector<float> BuildAutoCutAxisPositions(
+    const std::vector<LogicalPartPreviewBounds> &part_bounds,
+    bool vertical_axis, float minimum_gap) {
+  struct AxisInterval {
+    float min = 0.0f;
+    float max = 0.0f;
+  };
+
+  std::vector<AxisInterval> intervals;
+  intervals.reserve(part_bounds.size());
+  for (const LogicalPartPreviewBounds &part : part_bounds) {
+    if (!part.has_bounds) {
+      continue;
+    }
+
+    const float axis_min =
+        vertical_axis ? part.world_bounds_min.x : part.world_bounds_min.y;
+    const float axis_max =
+        vertical_axis ? part.world_bounds_max.x : part.world_bounds_max.y;
+    intervals.push_back(
+        {std::min(axis_min, axis_max), std::max(axis_min, axis_max)});
+  }
+
+  if (intervals.size() < 2) {
+    return {};
+  }
+
+  std::sort(intervals.begin(), intervals.end(),
+            [](const AxisInterval &a, const AxisInterval &b) {
+              if (a.min != b.min) {
+                return a.min < b.min;
+              }
+              return a.max < b.max;
+            });
+
+  std::vector<AxisInterval> merged_intervals;
+  merged_intervals.push_back(intervals.front());
+  for (size_t index = 1; index < intervals.size(); ++index) {
+    AxisInterval &current = merged_intervals.back();
+    const AxisInterval &candidate = intervals[index];
+    if (candidate.min <=
+        current.max + operations::detail::kSharedGuideClassificationEpsilon) {
+      current.max = std::max(current.max, candidate.max);
+      continue;
+    }
+    merged_intervals.push_back(candidate);
+  }
+
+  std::vector<float> positions;
+  for (size_t index = 1; index < merged_intervals.size(); ++index) {
+    const AxisInterval &previous = merged_intervals[index - 1];
+    const AxisInterval &next = merged_intervals[index];
+    const float gap = next.min - previous.max;
+    if (gap < minimum_gap) {
+      continue;
+    }
+    positions.push_back((previous.max + next.min) * 0.5f);
+  }
+
+  return positions;
+}
+
+AutoCutPreviewPlan BuildAutoCutPreviewPlan(const ImportedArtwork &artwork,
+                                           AutoCutPreviewAxisMode axis_mode,
+                                           float minimum_gap) {
+  AutoCutPreviewPlan plan;
+  std::vector<GuideSplitLogicalPart> logical_parts =
+      BuildGuideSplitLogicalParts(artwork, &plan.skipped_elements);
+  const size_t orphan_count = plan.skipped_elements.size();
+  const std::vector<LogicalPartPreviewBounds> logical_part_bounds =
+      BuildLogicalPartPreviewBounds(logical_parts);
+  const float normalized_gap = NormalizeAutoCutMinimumGap(minimum_gap);
+
+  if (AutoCutAxisModeIncludesVertical(axis_mode)) {
+    plan.layout.vertical_positions =
+        BuildAutoCutAxisPositions(logical_part_bounds, true, normalized_gap);
+  }
+  if (AutoCutAxisModeIncludesHorizontal(axis_mode)) {
+    plan.layout.horizontal_positions =
+        BuildAutoCutAxisPositions(logical_part_bounds, false, normalized_gap);
+  }
+
+  std::map<std::pair<int, int>, size_t> bucket_lookup;
+  const auto classify_axis = [](float min_value, float max_value,
+                                const std::vector<float> &positions,
+                                int *bucket) {
+    *bucket = 0;
+    for (float position : positions) {
+      if (max_value <
+          position - operations::detail::kSharedGuideClassificationEpsilon) {
+        return true;
+      }
+      if (min_value >
+          position + operations::detail::kSharedGuideClassificationEpsilon) {
+        *bucket += 1;
+        continue;
+      }
+      return false;
+    }
+    return true;
+  };
+
+  for (const LogicalPartPreviewBounds &part_bounds : logical_part_bounds) {
+    ImportedSeparationPreviewPart preview_part;
+    preview_part.world_bounds_min = part_bounds.world_bounds_min;
+    preview_part.world_bounds_max = part_bounds.world_bounds_max;
+
+    for (const int path_id : part_bounds.logical_part->path_ids) {
+      preview_part.elements.push_back({ImportedElementKind::Path, path_id});
+    }
+    for (const int text_id : part_bounds.logical_part->text_ids) {
+      preview_part.elements.push_back({ImportedElementKind::DxfText, text_id});
+    }
+
+    int bucket_column = 0;
+    int bucket_row = 0;
+    const bool in_vertical_band = classify_axis(
+        preview_part.world_bounds_min.x, preview_part.world_bounds_max.x,
+        plan.layout.vertical_positions, &bucket_column);
+    const bool in_horizontal_band = classify_axis(
+        preview_part.world_bounds_min.y, preview_part.world_bounds_max.y,
+        plan.layout.horizontal_positions, &bucket_row);
+
+    if (!in_vertical_band || !in_horizontal_band) {
+      preview_part.classification =
+          ImportedSeparationPreviewClassification::Crossing;
+      for (const int path_id : part_bounds.logical_part->path_ids) {
+        plan.skipped_elements.push_back({ImportedElementKind::Path, path_id});
+      }
+      for (const int text_id : part_bounds.logical_part->text_ids) {
+        plan.skipped_elements.push_back(
+            {ImportedElementKind::DxfText, text_id});
+      }
+      plan.preview_parts.push_back(std::move(preview_part));
+      continue;
+    }
+
+    preview_part.classification =
+        ImportedSeparationPreviewClassification::Assigned;
+    preview_part.bucket_column = bucket_column;
+    preview_part.bucket_row = bucket_row;
+
+    const std::pair<int, int> bucket_key(bucket_column, bucket_row);
+    auto bucket_it = bucket_lookup.find(bucket_key);
+    if (bucket_it == bucket_lookup.end()) {
+      const size_t new_index = plan.buckets.size();
+      plan.buckets.push_back(
+          {static_cast<int>(new_index), bucket_column, bucket_row, {}, {}});
+      bucket_lookup.emplace(bucket_key, new_index);
+      bucket_it = bucket_lookup.find(bucket_key);
+    }
+
+    AutoCutPreviewPlan::BucketAssignment &bucket =
+        plan.buckets[bucket_it->second];
+    preview_part.bucket_index = bucket.bucket_index;
+    bucket.path_ids.insert(part_bounds.logical_part->path_ids.begin(),
+                           part_bounds.logical_part->path_ids.end());
+    bucket.text_ids.insert(part_bounds.logical_part->text_ids.begin(),
+                           part_bounds.logical_part->text_ids.end());
+    plan.preview_parts.push_back(std::move(preview_part));
+  }
+
+  for (size_t index = 0; index < orphan_count; ++index) {
+    const ImportedElementSelection &skipped = plan.skipped_elements[index];
+    ImportedSeparationPreviewPart skipped_part;
+    skipped_part.classification =
+        ImportedSeparationPreviewClassification::Orphan;
+    if (skipped.kind == ImportedElementKind::Path) {
+      if (const ImportedPath *path = FindImportedPath(artwork, skipped.item_id);
+          path != nullptr) {
+        ImportedLocalBoundsToWorldBounds(
+            artwork, path->bounds_min, path->bounds_max,
+            &skipped_part.world_bounds_min, &skipped_part.world_bounds_max);
+      }
+    } else {
+      if (const ImportedDxfText *text =
+              FindImportedDxfText(artwork, skipped.item_id);
+          text != nullptr) {
+        ImportedLocalBoundsToWorldBounds(
+            artwork, text->bounds_min, text->bounds_max,
+            &skipped_part.world_bounds_min, &skipped_part.world_bounds_max);
+      }
+    }
+    skipped_part.elements.push_back(skipped);
+    plan.preview_parts.push_back(std::move(skipped_part));
+  }
+
+  return plan;
 }
 
 GuideSplitPreviewPlan BuildGuideSplitPreviewPlan(const ImportedArtwork &artwork,
@@ -1738,11 +2012,7 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
   }
 
   SetLastImportedOperationIssueElements(state, 0, {});
-  if (state.imported_artwork_separation_preview.active &&
-      state.imported_artwork_separation_preview.artwork_id ==
-          imported_artwork_id) {
-    ClearImportedArtworkSeparationPreviewState(state);
-  }
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
 
   const int moved_count =
       static_cast<int>(moved_path_ids.size() + moved_text_ids.size());
@@ -1816,11 +2086,7 @@ ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
   }
 
   SetLastImportedOperationIssueElements(state, 0, {});
-  if (state.imported_artwork_separation_preview.active &&
-      state.imported_artwork_separation_preview.artwork_id ==
-          imported_artwork_id) {
-    ClearImportedArtworkSeparationPreviewState(state);
-  }
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
 
   std::unordered_set<int> moved_path_ids;
   std::unordered_set<int> moved_text_ids;
@@ -1909,6 +2175,8 @@ bool TransformImportedArtwork(CanvasState &state, int imported_artwork_id,
   if (artwork == nullptr) {
     return false;
   }
+
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
 
   const ImVec2 size = detail::ImportedArtworkLocalSize(*artwork);
   const ImVec2 original_scaled_size =
@@ -2004,6 +2272,7 @@ AutoCloseImportedArtworkToPolyline(CanvasState &state, int imported_artwork_id,
   }
 
   SetLastImportedOperationIssueElements(state, 0, {});
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   AutoCloseImportedArtworkToPolylineInPlace(*artwork, weld_tolerance, &result);
 
   RecomputeImportedArtworkBounds(*artwork);
@@ -2039,6 +2308,10 @@ AutoCloseImportedArtworkToPolyline(CanvasState &state, int imported_artwork_id,
 ImportedArtworkOperationResult PrepareImportedArtworkForCutting(
     CanvasState &state, int imported_artwork_id, float weld_tolerance,
     ImportedArtworkPrepareMode mode, bool auto_close_to_polyline) {
+  if (FindImportedArtwork(state, imported_artwork_id) != nullptr) {
+    ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  }
+
   ImportedArtworkOperationResult result =
       operations::detail::PrepareImportedArtworkForCuttingShared(
           state, imported_artwork_id, weld_tolerance,
@@ -2398,6 +2671,92 @@ PreviewSeparateImportedArtworkByGuide(CanvasState &state,
 
 void ClearImportedArtworkSeparationPreview(CanvasState &state) {
   ClearImportedArtworkSeparationPreviewState(state);
+}
+
+ImportedArtworkOperationResult
+PreviewImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
+                              AutoCutPreviewAxisMode axis_mode,
+                              float minimum_gap) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Auto cut preview requires a valid imported artwork.";
+    ClearImportedArtworkAutoCutPreviewState(state);
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  AutoCutPreviewPlan plan = BuildAutoCutPreviewPlan(
+      *artwork, axis_mode, NormalizeAutoCutMinimumGap(minimum_gap));
+  const int inferred_cut_count =
+      static_cast<int>(plan.layout.vertical_positions.size() +
+                       plan.layout.horizontal_positions.size());
+
+  if (inferred_cut_count == 0) {
+    ClearImportedArtworkAutoCutPreviewState(state);
+    PopulateOperationReadiness(&result, *artwork);
+    result.skipped_count = static_cast<int>(plan.skipped_elements.size());
+    result.message = "Auto cut preview did not find any gaps wide enough for "
+                     "inferred cut bands.";
+    SetLastImportedOperationIssueElements(state, artwork->id,
+                                          std::move(plan.skipped_elements));
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  state.imported_artwork_auto_cut_preview.active = true;
+  state.imported_artwork_auto_cut_preview.artwork_id = imported_artwork_id;
+  state.imported_artwork_auto_cut_preview.axis_mode = axis_mode;
+  state.imported_artwork_auto_cut_preview.minimum_gap =
+      NormalizeAutoCutMinimumGap(minimum_gap);
+  state.imported_artwork_auto_cut_preview.vertical_positions =
+      plan.layout.vertical_positions;
+  state.imported_artwork_auto_cut_preview.horizontal_positions =
+      plan.layout.horizontal_positions;
+  state.imported_artwork_auto_cut_preview.future_band_count =
+      static_cast<int>(plan.buckets.size());
+  state.imported_artwork_auto_cut_preview.skipped_count =
+      static_cast<int>(plan.skipped_elements.size());
+  state.imported_artwork_auto_cut_preview.skipped_elements =
+      plan.skipped_elements;
+  state.imported_artwork_auto_cut_preview.parts = std::move(plan.preview_parts);
+
+  PopulateOperationReadiness(&result, *artwork);
+  result.success =
+      state.imported_artwork_auto_cut_preview.future_band_count > 0;
+  result.skipped_count = state.imported_artwork_auto_cut_preview.skipped_count;
+  result.message =
+      "Previewing auto cut using " +
+      std::to_string(
+          state.imported_artwork_auto_cut_preview.vertical_positions.size()) +
+      " vertical and " +
+      std::to_string(
+          state.imported_artwork_auto_cut_preview.horizontal_positions.size()) +
+      " horizontal inferred cuts across " +
+      std::to_string(
+          state.imported_artwork_auto_cut_preview.future_band_count) +
+      " band" +
+      (state.imported_artwork_auto_cut_preview.future_band_count == 1
+           ? std::string()
+           : std::string("s")) +
+      ".";
+  if (result.skipped_count > 0) {
+    result.message +=
+        " Skipped " + std::to_string(result.skipped_count) + " element" +
+        (result.skipped_count == 1 ? std::string() : std::string("s")) + ".";
+  }
+  state.imported_artwork_auto_cut_preview.message = result.message;
+  SetLastImportedOperationIssueElements(state, artwork->id,
+                                        std::move(plan.skipped_elements));
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+void ClearImportedArtworkAutoCutPreview(CanvasState &state) {
+  ClearImportedArtworkAutoCutPreviewState(state);
 }
 
 ImportedArtworkOperationResult
