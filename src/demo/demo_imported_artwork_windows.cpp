@@ -997,9 +997,11 @@ void DrawFilteredImportedItems(im2d::CanvasState &state,
 
 } // namespace
 
-void DrawImportedArtworkListWindow(im2d::CanvasState &state,
-                                   const char *window_title) {
-  ImGui::Begin(window_title);
+void DrawImportedArtworkTransientUi(im2d::CanvasState &state) {
+  DrawPrepareForCuttingModal(state);
+}
+
+void DrawImportedArtworkListContents(im2d::CanvasState &state) {
   ImGui::Text("Imported Objects: %d",
               static_cast<int>(state.imported_artwork.size()));
   if (HasAnyDxfArtwork(state)) {
@@ -1009,7 +1011,6 @@ void DrawImportedArtworkListWindow(im2d::CanvasState &state,
 
   if (state.imported_artwork.empty()) {
     ImGui::TextUnformatted("No imported objects on the canvas.");
-    ImGui::End();
     return;
   }
 
@@ -1024,15 +1025,16 @@ void DrawImportedArtworkListWindow(im2d::CanvasState &state,
     }
     ImGui::PopID();
   }
+}
 
+void DrawImportedArtworkListWindow(im2d::CanvasState &state,
+                                   const char *window_title) {
+  ImGui::Begin(window_title);
+  DrawImportedArtworkListContents(state);
   ImGui::End();
 }
 
-void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
-                                        const char *window_title) {
-  ImGui::Begin(window_title);
-  DrawPrepareForCuttingModal(state);
-
+void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
   im2d::ImportedArtwork *artwork =
       im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
   if (artwork == nullptr) {
@@ -1042,7 +1044,6 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
       im2d::ClearSelectedImportedElements(state);
     }
     ImGui::TextUnformatted("Select an imported object to inspect it.");
-    ImGui::End();
     return;
   }
 
@@ -1364,21 +1365,22 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   if (ImGui::Button("Delete")) {
     im2d::operations::DeleteImportedArtwork(state, artwork->id);
   }
+}
 
+void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
+                                        const char *window_title) {
+  ImGui::Begin(window_title);
+  DrawPrepareForCuttingModal(state);
+  DrawImportedArtworkInspectorContents(state);
   ImGui::End();
 }
 
-void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
-                                       const char *window_title) {
-  ImGui::Begin(window_title);
-  DrawPrepareForCuttingModal(state);
-
+void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
   im2d::ImportedArtwork *artwork =
       im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
   if (artwork == nullptr) {
     ImGui::TextUnformatted("Select an imported object to access marquee, "
                            "cutting, and extraction controls.");
-    ImGui::End();
     return;
   }
 
@@ -1565,7 +1567,13 @@ void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
       im2d::ClearImportedArtworkSeparationPreview(state);
     }
   }
+}
 
+void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
+                                       const char *window_title) {
+  ImGui::Begin(window_title);
+  DrawPrepareForCuttingModal(state);
+  DrawImportedArtworkWorkflowContents(state);
   ImGui::End();
 }
 

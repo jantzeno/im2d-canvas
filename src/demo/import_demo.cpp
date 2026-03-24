@@ -130,89 +130,119 @@ void DrawImportInspector(CanvasState &state) {
   static im2d::importer::ImportResult last_import_result;
   static DemoImportFormat active_format = DemoImportFormat::None;
   SyncWorkflowToSelectedArtwork(state, &active_format);
+  demo::DrawImportedArtworkTransientUi(state);
+
+  const ImGuiViewport *viewport = ImGui::GetMainViewport();
+  constexpr float kPanelMargin = 16.0f;
+  constexpr float kPanelWidth = 336.0f;
+  const ImVec2 panel_pos(viewport->WorkPos.x + kPanelMargin,
+                         viewport->WorkPos.y + kPanelMargin);
+  const ImVec2 panel_size(kPanelWidth,
+                          viewport->WorkSize.y - kPanelMargin * 2.0f);
+
+  ImGui::SetNextWindowPos(panel_pos, ImGuiCond_Always);
+  ImGui::SetNextWindowSize(panel_size, ImGuiCond_Always);
+  ImGui::Begin("Import Panel", nullptr, ImGuiWindowFlags_NoCollapse);
+
   fs::path clicked_path;
-  if (demo::DrawSampleBrowserWindow("Samples", fs::path("samples"),
-                                    {".svg", ".dxf"}, browser_state,
-                                    &clicked_path)) {
-    active_format = DetectImportFormat(clicked_path);
-    if (active_format == DemoImportFormat::Dxf) {
-      ActivateDxfWorkflow(state);
-      last_import_result = im2d::importer::ImportDxfFile(state, clicked_path);
-    } else {
-      ActivateSvgWorkflow(state);
-      last_import_result = im2d::importer::ImportSvgFile(state, clicked_path);
+  if (ImGui::CollapsingHeader("Samples", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (demo::DrawSampleBrowserContents(fs::path("samples"), {".svg", ".dxf"},
+                                        browser_state, &clicked_path)) {
+      active_format = DetectImportFormat(clicked_path);
+      if (active_format == DemoImportFormat::Dxf) {
+        ActivateDxfWorkflow(state);
+        last_import_result = im2d::importer::ImportDxfFile(state, clicked_path);
+      } else {
+        ActivateSvgWorkflow(state);
+        last_import_result = im2d::importer::ImportSvgFile(state, clicked_path);
+      }
     }
   }
 
-  ImGui::Begin("Import Controls");
-  ImGui::TextUnformatted(
-      "Prepared for viewport, artboard, and machine-bed experiments.");
-  ImGui::TextUnformatted("Sample assets live under samples/ with collapsible "
-                         "svg and dxf folders.");
-  ImGui::Separator();
-
-  const bool using_millimeters =
-      state.grid.unit == MeasurementUnit::Millimeters;
-  ImGui::Checkbox("Show Grid", &state.grid.visible);
-  ImGui::InputFloat("Grid Spacing", &state.grid.spacing,
-                    using_millimeters ? 5.0f : 4.0f,
-                    using_millimeters ? 25.0f : 16.0f,
-                    using_millimeters ? "%.1f mm" : "%.0f px");
-  ImGui::SliderInt("Grid Subdivisions", &state.grid.subdivisions, 1,
-                   using_millimeters ? 10 : 8);
-  ImGui::Checkbox("Snap to Main Grid", &state.snapping.to_grid_major);
-  ImGui::Checkbox("Snap to Subgrid", &state.snapping.to_grid_minor);
-  ImGui::SliderFloat("Snap Threshold", &state.snapping.screen_threshold, 2.0f,
-                     20.0f, "%.1f px");
-
-  if (ImGui::Button("Square ViewBox")) {
-    if (!state.working_areas.empty()) {
-      state.working_areas.front().size = ImVec2(512.0f, 512.0f);
-      state.export_areas.front().size = state.working_areas.front().size;
-    }
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Poster ViewBox")) {
-    if (!state.working_areas.empty()) {
-      state.working_areas.front().size = ImVec2(1080.0f, 1350.0f);
-      state.export_areas.front().size = state.working_areas.front().size;
-    }
-  }
-
-  if (active_format == DemoImportFormat::Dxf) {
+  if (ImGui::CollapsingHeader("Import Controls",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::TextUnformatted(
+        "Prepared for viewport, artboard, and machine-bed experiments.");
+    ImGui::TextUnformatted("Sample assets live under samples/ with collapsible "
+                           "svg and dxf folders.");
     ImGui::Separator();
-    ImGui::TextUnformatted("DXF Workflow");
-    ImGui::Checkbox("Snap to Guides", &state.snapping.to_guides);
 
-    if (ImGui::Button("Router Bed")) {
-      SetWorkingAreaSizeMillimeters(state, 1220.0f, 2440.0f);
+    const bool using_millimeters =
+        state.grid.unit == MeasurementUnit::Millimeters;
+    ImGui::Checkbox("Show Grid", &state.grid.visible);
+    ImGui::InputFloat("Grid Spacing", &state.grid.spacing,
+                      using_millimeters ? 5.0f : 4.0f,
+                      using_millimeters ? 25.0f : 16.0f,
+                      using_millimeters ? "%.1f mm" : "%.0f px");
+    ImGui::SliderInt("Grid Subdivisions", &state.grid.subdivisions, 1,
+                     using_millimeters ? 10 : 8);
+    ImGui::Checkbox("Snap to Main Grid", &state.snapping.to_grid_major);
+    ImGui::Checkbox("Snap to Subgrid", &state.snapping.to_grid_minor);
+    ImGui::SliderFloat("Snap Threshold", &state.snapping.screen_threshold, 2.0f,
+                       20.0f, "%.1f px");
+
+    if (ImGui::Button("Square ViewBox")) {
+      if (!state.working_areas.empty()) {
+        state.working_areas.front().size = ImVec2(512.0f, 512.0f);
+        state.export_areas.front().size = state.working_areas.front().size;
+      }
     }
     ImGui::SameLine();
-    if (ImGui::Button("Bench Plate")) {
-      SetWorkingAreaSizeMillimeters(state, 450.0f, 450.0f);
+    if (ImGui::Button("Poster ViewBox")) {
+      if (!state.working_areas.empty()) {
+        state.working_areas.front().size = ImVec2(1080.0f, 1350.0f);
+        state.export_areas.front().size = state.working_areas.front().size;
+      }
+    }
+
+    if (active_format == DemoImportFormat::Dxf) {
+      ImGui::Separator();
+      ImGui::TextUnformatted("DXF Workflow");
+      ImGui::Checkbox("Snap to Guides", &state.snapping.to_guides);
+
+      if (ImGui::Button("Router Bed")) {
+        SetWorkingAreaSizeMillimeters(state, 1220.0f, 2440.0f);
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Bench Plate")) {
+        SetWorkingAreaSizeMillimeters(state, 450.0f, 450.0f);
+      }
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Active Format: %s",
+                active_format == DemoImportFormat::Dxf   ? "DXF"
+                : active_format == DemoImportFormat::Svg ? "SVG"
+                                                         : "SVG defaults");
+    ImGui::Text("Working Areas: %d",
+                static_cast<int>(state.working_areas.size()));
+    ImGui::Text("Export Areas: %d",
+                static_cast<int>(state.export_areas.size()));
+    ImGui::Text("Layers: %d", static_cast<int>(state.layers.size()));
+    ImGui::Text("Guides: %d", static_cast<int>(state.guides.size()));
+    ImGui::Text("Artwork: %d", static_cast<int>(state.imported_artwork.size()));
+    if (!last_import_result.message.empty()) {
+      ImGui::Separator();
+      demo::DrawImportResultSummary(last_import_result);
     }
   }
 
-  ImGui::Separator();
-  ImGui::Text("Active Format: %s",
-              active_format == DemoImportFormat::Dxf   ? "DXF"
-              : active_format == DemoImportFormat::Svg ? "SVG"
-                                                       : "SVG defaults");
-  ImGui::Text("Working Areas: %d",
-              static_cast<int>(state.working_areas.size()));
-  ImGui::Text("Export Areas: %d", static_cast<int>(state.export_areas.size()));
-  ImGui::Text("Layers: %d", static_cast<int>(state.layers.size()));
-  ImGui::Text("Guides: %d", static_cast<int>(state.guides.size()));
-  ImGui::Text("Artwork: %d", static_cast<int>(state.imported_artwork.size()));
-  if (!last_import_result.message.empty()) {
-    ImGui::Separator();
-    demo::DrawImportResultSummary(last_import_result);
+  if (ImGui::CollapsingHeader("Canvas Objects",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    demo::DrawImportedArtworkListContents(state);
   }
-  ImGui::End();
 
-  demo::DrawImportedArtworkListWindow(state, "Canvas Objects");
-  demo::DrawImportedArtworkInspectorWindow(state, "Object Inspector");
-  demo::DrawImportedArtworkWorkflowWindow(state, "Object Workflow");
+  if (ImGui::CollapsingHeader("Object Inspector",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    demo::DrawImportedArtworkInspectorContents(state);
+  }
+
+  if (ImGui::CollapsingHeader("Object Workflow",
+                              ImGuiTreeNodeFlags_DefaultOpen)) {
+    demo::DrawImportedArtworkWorkflowContents(state);
+  }
+
+  ImGui::End();
 }
 
 } // namespace

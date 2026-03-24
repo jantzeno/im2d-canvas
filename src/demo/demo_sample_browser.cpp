@@ -169,11 +169,21 @@ bool DrawSampleBrowserWindow(const char *window_title,
                              const std::vector<std::string> &extensions,
                              SampleBrowserState &state,
                              std::filesystem::path *clicked_path) {
+  ImGui::Begin(window_title);
+  const bool clicked =
+      DrawSampleBrowserContents(directory, extensions, state, clicked_path);
+  ImGui::End();
+  return clicked;
+}
+
+bool DrawSampleBrowserContents(const std::filesystem::path &directory,
+                               const std::vector<std::string> &extensions,
+                               SampleBrowserState &state,
+                               std::filesystem::path *clicked_path) {
   SampleNode root =
       BuildSampleTree(directory, extensions, &state.error_message);
 
   bool clicked = false;
-  ImGui::Begin(window_title);
   ImGui::TextUnformatted(directory.string().c_str());
   ImGui::Separator();
 
@@ -187,7 +197,6 @@ bool DrawSampleBrowserWindow(const char *window_title,
     }
   }
 
-  ImGui::End();
   return clicked;
 }
 

@@ -5,10 +5,14 @@
 
 namespace demo {
 
+void DrawImportedArtworkTransientUi(im2d::CanvasState &state);
+void DrawImportedArtworkListContents(im2d::CanvasState &state);
 void DrawImportedArtworkListWindow(im2d::CanvasState &state,
                                    const char *window_title);
+void DrawImportedArtworkInspectorContents(im2d::CanvasState &state);
 void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
                                         const char *window_title);
+void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state);
 void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
                                        const char *window_title);
 void DrawImportResultSummary(const im2d::importer::ImportResult &result);
