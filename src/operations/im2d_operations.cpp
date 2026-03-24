@@ -6,6 +6,7 @@
 #include "../canvas/im2d_canvas_imported_artwork_ops.h"
 
 #include <algorithm>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -146,6 +147,23 @@ BuildArtworkSubset(const im2d::ImportedArtwork &source,
   subset.part.part_id = 0;
   subset.visible = source.visible;
   subset.flags = source.flags;
+  bool has_world_bounds = false;
+  ImVec2 subset_world_min(0.0f, 0.0f);
+
+  const auto include_world_bounds = [&](const ImVec2 &local_min,
+                                        const ImVec2 &local_max) {
+    ImVec2 world_min;
+    ImVec2 world_max;
+    im2d::ImportedLocalBoundsToWorldBounds(source, local_min, local_max,
+                                           &world_min, &world_max);
+    if (!has_world_bounds) {
+      subset_world_min = world_min;
+      has_world_bounds = true;
+      return;
+    }
+    subset_world_min.x = std::min(subset_world_min.x, world_min.x);
+    subset_world_min.y = std::min(subset_world_min.y, world_min.y);
+  };
 
   std::unordered_set<int> required_group_ids;
   required_group_ids.insert(source.root_group_id);
@@ -183,11 +201,13 @@ BuildArtworkSubset(const im2d::ImportedArtwork &source,
   for (const im2d::ImportedPath &path : source.paths) {
     if (path_ids.contains(path.id)) {
       subset.paths.push_back(path);
+      include_world_bounds(path.bounds_min, path.bounds_max);
     }
   }
   for (const im2d::ImportedDxfText &text : source.dxf_text) {
     if (text_ids.contains(text.id)) {
       subset.dxf_text.push_back(text);
+      include_world_bounds(text.bounds_min, text.bounds_max);
     }
   }
 
@@ -195,6 +215,9 @@ BuildArtworkSubset(const im2d::ImportedArtwork &source,
   im2d::RecomputeImportedArtworkBounds(subset);
   im2d::RecomputeImportedHierarchyBounds(subset);
   im2d::RefreshImportedArtworkPartMetadata(subset);
+  if (has_world_bounds) {
+    subset.origin = subset_world_min;
+  }
   return subset;
 }
 
@@ -249,7 +272,7 @@ im2d::ImportedArtworkOperationResult MoveImportedElementsToNewArtwork(
     artwork->part.part_id = state.next_imported_part_id++;
   }
   const int created_artwork_id =
-      im2d::AppendImportedArtwork(state, std::move(subset));
+      im2d::AppendImportedArtwork(state, std::move(subset), false);
   if (source_empty) {
     im2d::DeleteImportedArtwork(state, imported_artwork_id);
   }
@@ -402,32 +425,21 @@ ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
 }
 
 ImportedArtworkOperationResult
+PreviewSeparateImportedArtworkByGuide(CanvasState &state,
+                                      int imported_artwork_id, int guide_id) {
+  return im2d::PreviewSeparateImportedArtworkByGuide(state, imported_artwork_id,
+                                                     guide_id);
+}
+
+void ClearImportedArtworkSeparationPreview(CanvasState &state) {
+  im2d::ClearImportedArtworkSeparationPreview(state);
+}
+
+ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
                                int guide_id) {
-  return detail::SeparateImportedArtworkByGuideShared(
-      state, imported_artwork_id, guide_id,
-      [](CanvasState &callback_state, int callback_artwork_id,
-         const std::unordered_set<int> &path_ids,
-         const std::unordered_set<int> &text_ids,
-         const std::string &name_suffix, const std::string &action_verb) {
-        return MoveImportedElementsToNewArtwork(
-            callback_state, callback_artwork_id, path_ids, text_ids,
-            name_suffix, action_verb);
-      },
-      [](ImportedArtworkOperationResult *result,
-         const ImportedArtwork &artwork) {
-        PopulateOperationReadiness(result, artwork);
-      },
-      [](CanvasState &callback_state, int artwork_id,
-         std::vector<ImportedElementSelection> issue_elements) {
-        SetLastImportedOperationIssueElements(callback_state, artwork_id,
-                                              std::move(issue_elements));
-      },
-      [](CanvasState &callback_state,
-         ImportedArtworkOperationResult callback_result) {
-        SetLastImportedArtworkOperation(callback_state,
-                                        std::move(callback_result));
-      });
+  return im2d::SeparateImportedArtworkByGuide(state, imported_artwork_id,
+                                              guide_id);
 }
 
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id) {

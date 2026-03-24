@@ -1,6 +1,7 @@
 #include "demo_imported_artwork_windows.h"
 
 #include "../canvas/im2d_canvas_document.h"
+#include "../canvas/im2d_canvas_imported_artwork_ops.h"
 #include "../export/im2d_export_svg.h"
 #include "../operations/im2d_operations.h"
 
@@ -56,6 +57,68 @@ SvgExportUiState &GetSvgExportUiState() {
 PrepareWorkflowUiState &GetPrepareWorkflowUiState() {
   static PrepareWorkflowUiState state;
   return state;
+}
+
+bool HasActiveSeparationPreview(const im2d::CanvasState &state,
+                                int artwork_id) {
+  return state.imported_artwork_separation_preview.active &&
+         state.imported_artwork_separation_preview.artwork_id == artwork_id;
+}
+
+int GetPreviewAnchorGuideId(const im2d::CanvasState &state, int artwork_id) {
+  if (state.selected_guide_id != 0 &&
+      im2d::FindGuide(state, state.selected_guide_id) != nullptr) {
+    return state.selected_guide_id;
+  }
+  if (HasActiveSeparationPreview(state, artwork_id) &&
+      state.imported_artwork_separation_preview.guide_id != 0) {
+    return state.imported_artwork_separation_preview.guide_id;
+  }
+  if (!state.guides.empty()) {
+    return state.guides.front().id;
+  }
+  return 0;
+}
+
+void DrawPreviewAnchorGuideSelector(im2d::CanvasState &state,
+                                    int current_guide_id) {
+  const im2d::Guide *current_guide = im2d::FindGuide(state, current_guide_id);
+  std::string preview_label =
+      current_guide == nullptr
+          ? std::string("None")
+          : std::string(current_guide->orientation ==
+                                im2d::GuideOrientation::Vertical
+                            ? "Vertical"
+                            : "Horizontal") +
+                " Guide " + std::to_string(current_guide->id);
+
+  if (ImGui::BeginCombo("Preview Anchor Guide", preview_label.c_str())) {
+    for (const im2d::Guide &guide : state.guides) {
+      const bool selected = guide.id == current_guide_id;
+      const std::string guide_label =
+          std::string(guide.orientation == im2d::GuideOrientation::Vertical
+                          ? "Vertical"
+                          : "Horizontal") +
+          " Guide " + std::to_string(guide.id);
+      if (ImGui::Selectable(guide_label.c_str(), selected)) {
+        state.selected_guide_id = guide.id;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
+  }
+}
+
+int CountPreviewPartsByClassification(
+    const im2d::ImportedArtworkSeparationPreview &preview,
+    im2d::ImportedSeparationPreviewClassification classification) {
+  return static_cast<int>(std::count_if(
+      preview.parts.begin(), preview.parts.end(),
+      [classification](const im2d::ImportedSeparationPreviewPart &part) {
+        return part.classification == classification;
+      }));
 }
 
 constexpr const char *kPrepareForCuttingPopupId =
@@ -1047,28 +1110,6 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
         "Skipped By Last Op: %d",
         static_cast<int>(state.last_imported_operation_issue_elements.size()));
   }
-  ImGui::Separator();
-
-  ImGui::TextUnformatted("Edit Mode");
-  if (ImGui::RadioButton("None", state.imported_artwork_edit_mode ==
-                                     im2d::ImportedArtworkEditMode::None)) {
-    state.imported_artwork_edit_mode = im2d::ImportedArtworkEditMode::None;
-  }
-  ImGui::SameLine();
-  if (ImGui::RadioButton("Rect Marquee",
-                         state.imported_artwork_edit_mode ==
-                             im2d::ImportedArtworkEditMode::SelectRectangle)) {
-    state.imported_artwork_edit_mode =
-        im2d::ImportedArtworkEditMode::SelectRectangle;
-  }
-  ImGui::SameLine();
-  if (ImGui::RadioButton("Oval Marquee",
-                         state.imported_artwork_edit_mode ==
-                             im2d::ImportedArtworkEditMode::SelectOval)) {
-    state.imported_artwork_edit_mode =
-        im2d::ImportedArtworkEditMode::SelectOval;
-  }
-
   ImVec4 outline_color =
       !artwork->paths.empty()
           ? artwork->paths.front().stroke_color
@@ -1110,38 +1151,6 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   } else {
     DrawFilteredImportedItems(state, *artwork, filter_mode);
   }
-  ImGui::Separator();
-
-  if (ImGui::Button("Auto Close To Polyline")) {
-    im2d::AutoCloseImportedArtworkToPolyline(state, artwork->id);
-  }
-  ImGui::SameLine();
-  PrepareWorkflowUiState &prepare_workflow = GetPrepareWorkflowUiState();
-  ImGui::Checkbox("Auto Close Before Prepare",
-                  &prepare_workflow.auto_close_before_prepare);
-
-  ImGui::Separator();
-
-  if (ImGui::Button("Prepare For Cutting")) {
-    QueuePrepareForCuttingDialog(
-        *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::FidelityFirst);
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Prepare + Weld Cleanup")) {
-    QueuePrepareForCuttingDialog(
-        *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::AggressiveCleanup);
-  }
-  ImGui::SameLine();
-  const bool has_selected_elements = !state.selected_imported_elements.empty();
-  if (!has_selected_elements) {
-    ImGui::BeginDisabled();
-  }
-  if (ImGui::Button("Extract Selection")) {
-    im2d::operations::ExtractSelectedImportedElements(state, artwork->id);
-  }
-  if (!has_selected_elements) {
-    ImGui::EndDisabled();
-  }
 
   SvgExportUiState &export_ui = GetSvgExportUiState();
   SyncSvgExportUiState(&export_ui, state, *artwork);
@@ -1151,6 +1160,7 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   const std::filesystem::path export_area_path = BuildExportPath(
       export_ui.output_directory, export_ui.export_area_filename,
       DefaultExportAreaPath(state));
+  const bool has_selected_elements = !state.selected_imported_elements.empty();
 
   ImGui::Separator();
   ImGui::TextUnformatted("SVG Export");
@@ -1316,6 +1326,143 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   }
   if (ImGui::Button("Delete")) {
     im2d::operations::DeleteImportedArtwork(state, artwork->id);
+  }
+
+  ImGui::End();
+}
+
+void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
+                                       const char *window_title) {
+  ImGui::Begin(window_title);
+  DrawPrepareForCuttingModal(state);
+
+  im2d::ImportedArtwork *artwork =
+      im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
+  if (artwork == nullptr) {
+    ImGui::TextUnformatted("Select an imported object to access marquee, "
+                           "cutting, and extraction controls.");
+    ImGui::End();
+    return;
+  }
+
+  ImGui::Text("Workflow For: %s", artwork->name.c_str());
+  ImGui::Text("Selected Elements: %d",
+              static_cast<int>(state.selected_imported_elements.size()));
+  ImGui::Separator();
+
+  ImGui::TextUnformatted("Marquee Selection");
+  if (ImGui::RadioButton("None", state.imported_artwork_edit_mode ==
+                                     im2d::ImportedArtworkEditMode::None)) {
+    state.imported_artwork_edit_mode = im2d::ImportedArtworkEditMode::None;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("Rect Marquee",
+                         state.imported_artwork_edit_mode ==
+                             im2d::ImportedArtworkEditMode::SelectRectangle)) {
+    state.imported_artwork_edit_mode =
+        im2d::ImportedArtworkEditMode::SelectRectangle;
+  }
+  ImGui::SameLine();
+  if (ImGui::RadioButton("Oval Marquee",
+                         state.imported_artwork_edit_mode ==
+                             im2d::ImportedArtworkEditMode::SelectOval)) {
+    state.imported_artwork_edit_mode =
+        im2d::ImportedArtworkEditMode::SelectOval;
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Extraction");
+  const bool has_selected_elements = !state.selected_imported_elements.empty();
+  if (!has_selected_elements) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Extract Selection")) {
+    im2d::operations::ExtractSelectedImportedElements(state, artwork->id);
+  }
+  if (!has_selected_elements) {
+    ImGui::EndDisabled();
+  }
+  if (!has_selected_elements) {
+    ImGui::TextUnformatted(
+        "Use a marquee mode on the canvas to select elements first.");
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Cut Preparation");
+  if (ImGui::Button("Auto Close To Polyline")) {
+    im2d::AutoCloseImportedArtworkToPolyline(state, artwork->id);
+  }
+  ImGui::SameLine();
+  PrepareWorkflowUiState &prepare_workflow = GetPrepareWorkflowUiState();
+  ImGui::Checkbox("Auto Close Before Prepare",
+                  &prepare_workflow.auto_close_before_prepare);
+
+  if (ImGui::Button("Prepare For Cutting")) {
+    QueuePrepareForCuttingDialog(
+        *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::FidelityFirst);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Prepare + Weld Cleanup")) {
+    QueuePrepareForCuttingDialog(
+        *artwork, 0.5f, im2d::ImportedArtworkPrepareMode::AggressiveCleanup);
+  }
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Guide Separation");
+  ImGui::TextWrapped(
+      "Preview and apply multi-guide cuts for the selected artwork. Parts that "
+      "cross a guide stay skipped until the guides cleanly separate them.");
+  const int preview_anchor_guide_id =
+      GetPreviewAnchorGuideId(state, artwork->id);
+  const bool has_guides = preview_anchor_guide_id != 0;
+  if (!has_guides) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Preview Multi-Guide Split")) {
+    im2d::PreviewSeparateImportedArtworkByGuide(state, artwork->id,
+                                                preview_anchor_guide_id);
+  }
+  if (!has_guides) {
+    ImGui::EndDisabled();
+  }
+  if (!has_guides) {
+    ImGui::TextUnformatted(
+        "Add at least one guide on the canvas to enable split preview.");
+  } else {
+    ImGui::Text("Active Guides: %d", static_cast<int>(state.guides.size()));
+    DrawPreviewAnchorGuideSelector(state, preview_anchor_guide_id);
+  }
+
+  const bool has_separation_preview =
+      HasActiveSeparationPreview(state, artwork->id);
+  if (has_separation_preview) {
+    ImGui::Separator();
+    const im2d::ImportedArtworkSeparationPreview &preview =
+        state.imported_artwork_separation_preview;
+    const int assigned_count = CountPreviewPartsByClassification(
+        preview, im2d::ImportedSeparationPreviewClassification::Assigned);
+    const int crossing_count = CountPreviewPartsByClassification(
+        preview, im2d::ImportedSeparationPreviewClassification::Crossing);
+    const int orphan_count = CountPreviewPartsByClassification(
+        preview, im2d::ImportedSeparationPreviewClassification::Orphan);
+    ImGui::TextUnformatted("Guide Split Preview");
+    ImGui::Text("Guides: %d", static_cast<int>(preview.guide_ids.size()));
+    ImGui::Text("Future Objects: %d", preview.future_object_count);
+    ImGui::Text("Skipped: %d", preview.skipped_count);
+    ImGui::Text("Assigned Parts: %d", assigned_count);
+    ImGui::Text("Crossing Parts: %d", crossing_count);
+    ImGui::Text("Orphan Parts: %d", orphan_count);
+    if (!preview.message.empty()) {
+      ImGui::TextWrapped("%s", preview.message.c_str());
+    }
+    if (ImGui::Button("Apply Previewed Split")) {
+      im2d::SeparateImportedArtworkByGuide(state, artwork->id,
+                                           preview.guide_id);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Split Preview")) {
+      im2d::ClearImportedArtworkSeparationPreview(state);
+    }
   }
 
   ImGui::End();

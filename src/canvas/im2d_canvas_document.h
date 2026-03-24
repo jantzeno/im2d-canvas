@@ -7,7 +7,8 @@ namespace im2d {
 void InitializeDefaultDocument(CanvasState &state);
 int AddWorkingArea(CanvasState &state,
                    const WorkingAreaCreateInfo &create_info);
-int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork);
+int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
+                          bool auto_place = true);
 void ClearImportedArtwork(CanvasState &state);
 void ClearImportedDebugSelection(CanvasState &state);
 void ClearSelectedImportedElements(CanvasState &state);

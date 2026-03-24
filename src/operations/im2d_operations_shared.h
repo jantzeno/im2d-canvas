@@ -225,6 +225,11 @@ inline bool DeleteImportedArtworkShared(CanvasState &state,
   log::GetLogger()->info("Deleted imported artwork id={} name='{}'", it->id,
                          it->name);
   state.imported_artwork.erase(it);
+  if (state.imported_artwork_separation_preview.active &&
+      state.imported_artwork_separation_preview.artwork_id ==
+          imported_artwork_id) {
+    state.imported_artwork_separation_preview = {};
+  }
   if (state.selected_imported_artwork_id == imported_artwork_id) {
     state.selected_imported_artwork_id = 0;
     im2d::ClearSelectedImportedElements(state);

@@ -24,6 +24,10 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
     CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
     const ImVec2 &world_end, ImportedArtworkEditMode mode);
 ImportedArtworkOperationResult
+PreviewSeparateImportedArtworkByGuide(CanvasState &state,
+                                      int imported_artwork_id, int guide_id);
+void ClearImportedArtworkSeparationPreview(CanvasState &state);
+ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,

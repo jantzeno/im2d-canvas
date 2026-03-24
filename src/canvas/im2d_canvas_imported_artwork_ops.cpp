@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -51,6 +53,10 @@ void SetLastImportedOperationIssueElements(
     std::vector<ImportedElementSelection> issue_elements) {
   state.last_imported_operation_issue_artwork_id = artwork_id;
   state.last_imported_operation_issue_elements = std::move(issue_elements);
+}
+
+void ClearImportedArtworkSeparationPreviewState(CanvasState &state) {
+  state.imported_artwork_separation_preview = {};
 }
 
 void PopulateOperationReadiness(ImportedArtworkOperationResult *result,
@@ -199,6 +205,23 @@ ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
   subset.part.part_id = 0;
   subset.visible = source.visible;
   subset.flags = source.flags;
+  bool has_world_bounds = false;
+  ImVec2 subset_world_min(0.0f, 0.0f);
+
+  const auto include_world_bounds = [&](const ImVec2 &local_min,
+                                        const ImVec2 &local_max) {
+    ImVec2 world_min;
+    ImVec2 world_max;
+    ImportedLocalBoundsToWorldBounds(source, local_min, local_max, &world_min,
+                                     &world_max);
+    if (!has_world_bounds) {
+      subset_world_min = world_min;
+      has_world_bounds = true;
+      return;
+    }
+    subset_world_min.x = std::min(subset_world_min.x, world_min.x);
+    subset_world_min.y = std::min(subset_world_min.y, world_min.y);
+  };
 
   std::unordered_set<int> required_group_ids;
   required_group_ids.insert(source.root_group_id);
@@ -236,11 +259,13 @@ ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
   for (const ImportedPath &path : source.paths) {
     if (path_ids.contains(path.id)) {
       subset.paths.push_back(path);
+      include_world_bounds(path.bounds_min, path.bounds_max);
     }
   }
   for (const ImportedDxfText &text : source.dxf_text) {
     if (text_ids.contains(text.id)) {
       subset.dxf_text.push_back(text);
+      include_world_bounds(text.bounds_min, text.bounds_max);
     }
   }
 
@@ -248,7 +273,309 @@ ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
   RecomputeImportedArtworkBounds(subset);
   RecomputeImportedHierarchyBounds(subset);
   RefreshImportedArtworkPartMetadata(subset);
+  if (has_world_bounds) {
+    subset.origin = subset_world_min;
+  }
   return subset;
+}
+
+struct GuideSplitLogicalPart {
+  std::unordered_set<int> path_ids;
+  std::unordered_set<int> text_ids;
+  std::vector<ImVec2> sample_points;
+};
+
+struct GuideSplitPreviewPlan {
+  struct BucketAssignment {
+    int bucket_index = -1;
+    int bucket_column = 0;
+    int bucket_row = 0;
+    std::unordered_set<int> path_ids;
+    std::unordered_set<int> text_ids;
+  };
+
+  std::vector<int> guide_ids;
+  std::vector<BucketAssignment> buckets;
+  std::vector<ImportedElementSelection> skipped_elements;
+  std::vector<ImportedSeparationPreviewPart> preview_parts;
+};
+
+struct GuideBandLayout {
+  std::vector<float> vertical_positions;
+  std::vector<float> horizontal_positions;
+};
+
+ImVec2 MinPoint(const ImVec2 &a, const ImVec2 &b) {
+  return ImVec2(std::min(a.x, b.x), std::min(a.y, b.y));
+}
+
+ImVec2 MaxPoint(const ImVec2 &a, const ImVec2 &b) {
+  return ImVec2(std::max(a.x, b.x), std::max(a.y, b.y));
+}
+
+void AppendPartPathSamples(const ImportedArtwork &artwork,
+                           const std::unordered_set<int> &path_ids,
+                           std::vector<ImVec2> *sample_points) {
+  for (const int path_id : path_ids) {
+    const ImportedPath *path = FindImportedPath(artwork, path_id);
+    if (path == nullptr) {
+      continue;
+    }
+    operations::detail::AppendPathSamplePointsWorldShared(artwork, *path,
+                                                          sample_points);
+  }
+}
+
+void AppendPartTextSamples(const ImportedArtwork &artwork,
+                           const std::unordered_set<int> &text_ids,
+                           std::vector<ImVec2> *sample_points) {
+  for (const int text_id : text_ids) {
+    const ImportedDxfText *text = FindImportedDxfText(artwork, text_id);
+    if (text == nullptr) {
+      continue;
+    }
+    operations::detail::AppendTextSamplePointsWorldShared(artwork, *text,
+                                                          sample_points);
+  }
+}
+
+std::vector<GuideSplitLogicalPart> BuildGuideSplitLogicalParts(
+    const ImportedArtwork &artwork,
+    std::vector<ImportedElementSelection> *skipped_elements) {
+  std::vector<GuideSplitLogicalPart> parts;
+  std::unordered_map<int, size_t> path_outer_part_indices;
+  std::unordered_map<int, size_t> text_outer_part_indices;
+  std::unordered_set<int> assigned_path_ids;
+  std::unordered_set<int> assigned_text_ids;
+  std::unordered_set<int> orphan_path_ids;
+  std::unordered_set<int> orphan_text_ids;
+
+  for (const ImportedContourReference &hole_ref : artwork.part.orphan_holes) {
+    if (hole_ref.kind == ImportedElementKind::Path) {
+      orphan_path_ids.insert(hole_ref.item_id);
+    } else {
+      orphan_text_ids.insert(hole_ref.item_id);
+    }
+  }
+
+  const auto ensure_part_for_outer =
+      [&](const ImportedContourReference &outer) -> GuideSplitLogicalPart * {
+    if (outer.kind == ImportedElementKind::Path) {
+      auto it = path_outer_part_indices.find(outer.item_id);
+      if (it != path_outer_part_indices.end()) {
+        return &parts[it->second];
+      }
+      const size_t index = parts.size();
+      parts.push_back({});
+      parts.back().path_ids.insert(outer.item_id);
+      path_outer_part_indices.emplace(outer.item_id, index);
+      assigned_path_ids.insert(outer.item_id);
+      return &parts.back();
+    }
+
+    auto it = text_outer_part_indices.find(outer.item_id);
+    if (it != text_outer_part_indices.end()) {
+      return &parts[it->second];
+    }
+    const size_t index = parts.size();
+    parts.push_back({});
+    parts.back().text_ids.insert(outer.item_id);
+    text_outer_part_indices.emplace(outer.item_id, index);
+    assigned_text_ids.insert(outer.item_id);
+    return &parts.back();
+  };
+
+  for (const ImportedHoleOwnership &ownership : artwork.part.hole_attachments) {
+    GuideSplitLogicalPart *part = ensure_part_for_outer(ownership.outer);
+    if (ownership.hole.kind == ImportedElementKind::Path) {
+      part->path_ids.insert(ownership.hole.item_id);
+      assigned_path_ids.insert(ownership.hole.item_id);
+    } else {
+      part->text_ids.insert(ownership.hole.item_id);
+      assigned_text_ids.insert(ownership.hole.item_id);
+    }
+  }
+
+  for (const ImportedPath &path : artwork.paths) {
+    if (assigned_path_ids.contains(path.id)) {
+      continue;
+    }
+    if (orphan_path_ids.contains(path.id)) {
+      skipped_elements->push_back({ImportedElementKind::Path, path.id});
+      continue;
+    }
+    GuideSplitLogicalPart part;
+    part.path_ids.insert(path.id);
+    assigned_path_ids.insert(path.id);
+    parts.push_back(std::move(part));
+  }
+
+  for (const ImportedDxfText &text : artwork.dxf_text) {
+    if (assigned_text_ids.contains(text.id)) {
+      continue;
+    }
+    if (orphan_text_ids.contains(text.id)) {
+      skipped_elements->push_back({ImportedElementKind::DxfText, text.id});
+      continue;
+    }
+    GuideSplitLogicalPart part;
+    part.text_ids.insert(text.id);
+    assigned_text_ids.insert(text.id);
+    parts.push_back(std::move(part));
+  }
+
+  for (GuideSplitLogicalPart &part : parts) {
+    AppendPartPathSamples(artwork, part.path_ids, &part.sample_points);
+    AppendPartTextSamples(artwork, part.text_ids, &part.sample_points);
+  }
+
+  return parts;
+}
+
+GuideSplitPreviewPlan BuildGuideSplitPreviewPlan(const ImportedArtwork &artwork,
+                                                 const CanvasState &state,
+                                                 int requested_guide_id) {
+  GuideSplitPreviewPlan plan;
+  GuideBandLayout layout;
+  for (const Guide &guide : state.guides) {
+    plan.guide_ids.push_back(guide.id);
+    if (guide.orientation == GuideOrientation::Vertical) {
+      layout.vertical_positions.push_back(guide.position);
+    } else {
+      layout.horizontal_positions.push_back(guide.position);
+    }
+  }
+  std::sort(layout.vertical_positions.begin(), layout.vertical_positions.end());
+  std::sort(layout.horizontal_positions.begin(),
+            layout.horizontal_positions.end());
+  std::vector<GuideSplitLogicalPart> logical_parts =
+      BuildGuideSplitLogicalParts(artwork, &plan.skipped_elements);
+  const size_t orphan_count = plan.skipped_elements.size();
+  std::map<std::pair<int, int>, size_t> bucket_lookup;
+
+  const auto classify_axis = [](float min_value, float max_value,
+                                const std::vector<float> &positions,
+                                int *bucket) {
+    *bucket = 0;
+    for (float position : positions) {
+      if (max_value <
+          position - operations::detail::kSharedGuideClassificationEpsilon) {
+        return true;
+      }
+      if (min_value >
+          position + operations::detail::kSharedGuideClassificationEpsilon) {
+        *bucket += 1;
+        continue;
+      }
+      return false;
+    }
+    return true;
+  };
+
+  for (const GuideSplitLogicalPart &part : logical_parts) {
+    ImportedSeparationPreviewPart preview_part;
+    preview_part.world_bounds_min = ImVec2(std::numeric_limits<float>::max(),
+                                           std::numeric_limits<float>::max());
+    preview_part.world_bounds_max = ImVec2(-std::numeric_limits<float>::max(),
+                                           -std::numeric_limits<float>::max());
+
+    for (const int path_id : part.path_ids) {
+      preview_part.elements.push_back({ImportedElementKind::Path, path_id});
+    }
+    for (const int text_id : part.text_ids) {
+      preview_part.elements.push_back({ImportedElementKind::DxfText, text_id});
+    }
+
+    for (const ImVec2 &point : part.sample_points) {
+      preview_part.world_bounds_min =
+          MinPoint(preview_part.world_bounds_min, point);
+      preview_part.world_bounds_max =
+          MaxPoint(preview_part.world_bounds_max, point);
+    }
+
+    if (part.sample_points.empty()) {
+      preview_part.world_bounds_min = ImVec2(0.0f, 0.0f);
+      preview_part.world_bounds_max = ImVec2(0.0f, 0.0f);
+    }
+
+    int bucket_column = 0;
+    int bucket_row = 0;
+    const bool in_vertical_band = classify_axis(
+        preview_part.world_bounds_min.x, preview_part.world_bounds_max.x,
+        layout.vertical_positions, &bucket_column);
+    const bool in_horizontal_band = classify_axis(
+        preview_part.world_bounds_min.y, preview_part.world_bounds_max.y,
+        layout.horizontal_positions, &bucket_row);
+
+    if (!in_vertical_band || !in_horizontal_band) {
+      preview_part.classification =
+          ImportedSeparationPreviewClassification::Crossing;
+      for (const int path_id : part.path_ids) {
+        plan.skipped_elements.push_back({ImportedElementKind::Path, path_id});
+      }
+      for (const int text_id : part.text_ids) {
+        plan.skipped_elements.push_back(
+            {ImportedElementKind::DxfText, text_id});
+      }
+      plan.preview_parts.push_back(std::move(preview_part));
+      continue;
+    }
+
+    preview_part.classification =
+        ImportedSeparationPreviewClassification::Assigned;
+    preview_part.bucket_column = bucket_column;
+    preview_part.bucket_row = bucket_row;
+
+    const std::pair<int, int> bucket_key(bucket_column, bucket_row);
+    auto bucket_it = bucket_lookup.find(bucket_key);
+    if (bucket_it == bucket_lookup.end()) {
+      const size_t new_index = plan.buckets.size();
+      plan.buckets.push_back(
+          {static_cast<int>(new_index), bucket_column, bucket_row, {}, {}});
+      bucket_lookup.emplace(bucket_key, new_index);
+      bucket_it = bucket_lookup.find(bucket_key);
+    }
+
+    GuideSplitPreviewPlan::BucketAssignment &bucket =
+        plan.buckets[bucket_it->second];
+    preview_part.bucket_index = bucket.bucket_index;
+    bucket.path_ids.insert(part.path_ids.begin(), part.path_ids.end());
+    bucket.text_ids.insert(part.text_ids.begin(), part.text_ids.end());
+    plan.preview_parts.push_back(std::move(preview_part));
+  }
+
+  for (size_t index = 0; index < orphan_count; ++index) {
+    const ImportedElementSelection &skipped = plan.skipped_elements[index];
+    ImportedSeparationPreviewPart skipped_part;
+    skipped_part.classification =
+        ImportedSeparationPreviewClassification::Orphan;
+    if (skipped.kind == ImportedElementKind::Path) {
+      if (const ImportedPath *path = FindImportedPath(artwork, skipped.item_id);
+          path != nullptr) {
+        ImportedLocalBoundsToWorldBounds(
+            artwork, path->bounds_min, path->bounds_max,
+            &skipped_part.world_bounds_min, &skipped_part.world_bounds_max);
+      }
+    } else {
+      if (const ImportedDxfText *text =
+              FindImportedDxfText(artwork, skipped.item_id);
+          text != nullptr) {
+        ImportedLocalBoundsToWorldBounds(
+            artwork, text->bounds_min, text->bounds_max,
+            &skipped_part.world_bounds_min, &skipped_part.world_bounds_max);
+      }
+    }
+    skipped_part.elements.push_back(skipped);
+    plan.preview_parts.push_back(std::move(skipped_part));
+  }
+
+  if (requested_guide_id != 0 &&
+      std::find(plan.guide_ids.begin(), plan.guide_ids.end(),
+                requested_guide_id) == plan.guide_ids.end()) {
+    plan.guide_ids.push_back(requested_guide_id);
+  }
+
+  return plan;
 }
 
 ImportedPath ReverseImportedPathCopy(const ImportedPath &path) {
@@ -1411,6 +1738,11 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
   }
 
   SetLastImportedOperationIssueElements(state, 0, {});
+  if (state.imported_artwork_separation_preview.active &&
+      state.imported_artwork_separation_preview.artwork_id ==
+          imported_artwork_id) {
+    ClearImportedArtworkSeparationPreviewState(state);
+  }
 
   const int moved_count =
       static_cast<int>(moved_path_ids.size() + moved_text_ids.size());
@@ -1443,7 +1775,7 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
     artwork->part.part_id = state.next_imported_part_id++;
   }
   const int created_artwork_id =
-      AppendImportedArtwork(state, std::move(subset));
+      AppendImportedArtwork(state, std::move(subset), false);
   if (source_empty) {
     DeleteImportedArtwork(state, imported_artwork_id);
   }
@@ -1464,6 +1796,108 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
                    " imported element" +
                    (moved_count == 1 ? std::string() : std::string("s")) +
                    " into a new artwork.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
+    CanvasState &state, int imported_artwork_id,
+    const std::vector<GuideSplitPreviewPlan::BucketAssignment> &buckets,
+    const std::string &name_suffix, const std::string &action_verb) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  SetLastImportedOperationIssueElements(state, 0, {});
+  if (state.imported_artwork_separation_preview.active &&
+      state.imported_artwork_separation_preview.artwork_id ==
+          imported_artwork_id) {
+    ClearImportedArtworkSeparationPreviewState(state);
+  }
+
+  std::unordered_set<int> moved_path_ids;
+  std::unordered_set<int> moved_text_ids;
+  for (const GuideSplitPreviewPlan::BucketAssignment &bucket : buckets) {
+    moved_path_ids.insert(bucket.path_ids.begin(), bucket.path_ids.end());
+    moved_text_ids.insert(bucket.text_ids.begin(), bucket.text_ids.end());
+  }
+
+  const int moved_count =
+      static_cast<int>(moved_path_ids.size() + moved_text_ids.size());
+  result.moved_count = moved_count;
+  if (moved_count == 0) {
+    result.message = "No imported elements were eligible for extraction.";
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  std::vector<ImportedArtwork> subsets;
+  subsets.reserve(buckets.size());
+  for (const GuideSplitPreviewPlan::BucketAssignment &bucket : buckets) {
+    if (bucket.path_ids.empty() && bucket.text_ids.empty()) {
+      continue;
+    }
+    subsets.push_back(BuildArtworkSubset(
+        *artwork, bucket.path_ids, bucket.text_ids,
+        name_suffix + " R" + std::to_string(bucket.bucket_row + 1) + "C" +
+            std::to_string(bucket.bucket_column + 1)));
+  }
+
+  std::erase_if(artwork->paths, [&moved_path_ids](const ImportedPath &path) {
+    return moved_path_ids.contains(path.id);
+  });
+  std::erase_if(artwork->dxf_text,
+                [&moved_text_ids](const ImportedDxfText &text) {
+                  return moved_text_ids.contains(text.id);
+                });
+
+  PruneEmptyGroups(*artwork);
+  ResetImportedArtworkCounters(*artwork);
+  RecomputeImportedArtworkBounds(*artwork);
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+
+  const bool source_empty = artwork->paths.empty() && artwork->dxf_text.empty();
+  if (!source_empty) {
+    artwork->part.part_id = state.next_imported_part_id++;
+  }
+
+  int created_artwork_id = 0;
+  for (ImportedArtwork &subset : subsets) {
+    const int appended_artwork_id =
+        AppendImportedArtwork(state, std::move(subset), false);
+    if (created_artwork_id == 0) {
+      created_artwork_id = appended_artwork_id;
+    }
+  }
+  if (source_empty) {
+    DeleteImportedArtwork(state, imported_artwork_id);
+  }
+
+  ClearSelectedImportedElements(state);
+  state.selected_imported_artwork_id = created_artwork_id;
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                   created_artwork_id, 0};
+
+  result.success = created_artwork_id != 0;
+  result.created_artwork_id = created_artwork_id;
+  if (const ImportedArtwork *created_artwork =
+          FindImportedArtwork(state, created_artwork_id);
+      created_artwork != nullptr) {
+    PopulateOperationReadiness(&result, *created_artwork);
+  }
+  result.message =
+      action_verb + " " + std::to_string(moved_count) + " imported element" +
+      (moved_count == 1 ? std::string() : std::string("s")) + " into " +
+      std::to_string(subsets.size()) + " artwork" +
+      (subsets.size() == 1 ? std::string() : std::string("s")) + ".";
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
@@ -1896,6 +2330,77 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
 }
 
 ImportedArtworkOperationResult
+PreviewSeparateImportedArtworkByGuide(CanvasState &state,
+                                      int imported_artwork_id, int guide_id) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  const Guide *guide = FindGuide(state, guide_id);
+  if (artwork == nullptr || guide == nullptr) {
+    result.message =
+        "Guide split preview requires a valid guide and imported artwork.";
+    ClearImportedArtworkSeparationPreviewState(state);
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  GuideSplitPreviewPlan plan =
+      BuildGuideSplitPreviewPlan(*artwork, state, guide_id);
+  state.imported_artwork_separation_preview.active = true;
+  state.imported_artwork_separation_preview.artwork_id = imported_artwork_id;
+  state.imported_artwork_separation_preview.guide_id = guide_id;
+  state.selected_guide_id = guide_id;
+  state.imported_artwork_separation_preview.guide_ids = plan.guide_ids;
+  state.imported_artwork_separation_preview.future_object_count =
+      static_cast<int>(plan.buckets.size());
+  state.imported_artwork_separation_preview.skipped_count =
+      static_cast<int>(plan.skipped_elements.size());
+  state.imported_artwork_separation_preview.skipped_elements =
+      plan.skipped_elements;
+  state.imported_artwork_separation_preview.parts =
+      std::move(plan.preview_parts);
+
+  PopulateOperationReadiness(&result, *artwork);
+  result.success =
+      state.imported_artwork_separation_preview.future_object_count > 0;
+  result.skipped_count =
+      state.imported_artwork_separation_preview.skipped_count;
+  result.created_artwork_id = 0;
+  result.message =
+      "Previewing guide-band split across " +
+      std::to_string(
+          state.imported_artwork_separation_preview.guide_ids.size()) +
+      " guide" +
+      (state.imported_artwork_separation_preview.guide_ids.size() == 1
+           ? std::string()
+           : std::string("s")) +
+      " into " +
+      std::to_string(
+          state.imported_artwork_separation_preview.future_object_count) +
+      " object" +
+      (state.imported_artwork_separation_preview.future_object_count == 1
+           ? std::string()
+           : std::string("s")) +
+      ".";
+  if (result.skipped_count > 0) {
+    result.message +=
+        " Skipped " + std::to_string(result.skipped_count) + " element" +
+        (result.skipped_count == 1 ? std::string() : std::string("s")) + ".";
+  }
+  state.imported_artwork_separation_preview.message = result.message;
+  SetLastImportedOperationIssueElements(state, artwork->id,
+                                        plan.skipped_elements);
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+void ClearImportedArtworkSeparationPreview(CanvasState &state) {
+  ClearImportedArtworkSeparationPreviewState(state);
+}
+
+ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
   return operations::detail::ExtractSelectedImportedElementsShared(
       state, imported_artwork_id,
@@ -1922,30 +2427,45 @@ ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
 ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
                                int guide_id) {
-  return operations::detail::SeparateImportedArtworkByGuideShared(
-      state, imported_artwork_id, guide_id,
-      [](CanvasState &callback_state, int callback_artwork_id,
-         const std::unordered_set<int> &path_ids,
-         const std::unordered_set<int> &text_ids,
-         const std::string &name_suffix, const std::string &action_verb) {
-        return MoveImportedElementsToNewArtwork(
-            callback_state, callback_artwork_id, path_ids, text_ids,
-            name_suffix, action_verb);
-      },
-      [](ImportedArtworkOperationResult *result,
-         const ImportedArtwork &artwork) {
-        PopulateOperationReadiness(result, artwork);
-      },
-      [](CanvasState &callback_state, int artwork_id,
-         std::vector<ImportedElementSelection> issue_elements) {
-        SetLastImportedOperationIssueElements(callback_state, artwork_id,
-                                              std::move(issue_elements));
-      },
-      [](CanvasState &callback_state,
-         ImportedArtworkOperationResult callback_result) {
-        SetLastImportedArtworkOperation(callback_state,
-                                        std::move(callback_result));
-      });
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  const Guide *guide = FindGuide(state, guide_id);
+  if (artwork == nullptr || guide == nullptr) {
+    result.message = "Guide split requires a valid guide and imported artwork.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  GuideSplitPreviewPlan plan =
+      BuildGuideSplitPreviewPlan(*artwork, state, guide_id);
+  result.skipped_count = static_cast<int>(plan.skipped_elements.size());
+  if (plan.buckets.size() <= 1) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message =
+        "Guide-band split needs movable content in more than one band.";
+    SetLastImportedOperationIssueElements(state, artwork->id,
+                                          std::move(plan.skipped_elements));
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  result = MoveImportedElementsToNewArtworks(
+      state, imported_artwork_id, plan.buckets, " Guide Split", "Split");
+  result.skipped_count = static_cast<int>(plan.skipped_elements.size());
+  if (result.skipped_count > 0) {
+    result.message +=
+        " Skipped " + std::to_string(result.skipped_count) + " element" +
+        (result.skipped_count == 1 ? std::string() : std::string("s")) +
+        " that crossed the guide or could not be attached to an outer contour.";
+  }
+  ClearImportedArtworkSeparationPreviewState(state);
+  SetLastImportedOperationIssueElements(state, imported_artwork_id,
+                                        std::move(plan.skipped_elements));
+  SetLastImportedArtworkOperation(state, result);
+  return result;
 }
 
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id) {

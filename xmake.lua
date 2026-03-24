@@ -94,7 +94,7 @@ target("canvas_demo")
     set_default(true)
     set_rundir("$(projectdir)")
     add_files("src/demo/demo_app.cpp", "src/demo/main.cpp")
-    add_deps("im2d_canvas", "im2d_logging")
+    add_deps("im2d_canvas", "im2d_operations", "im2d_logging")
     add_packages("libsdl3", "glad", "imgui")
 
 target("import_demo")

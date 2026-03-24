@@ -516,7 +516,8 @@ int AddWorkingArea(CanvasState &state,
   return area.id;
 }
 
-int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
+int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
+                          bool auto_place) {
   artwork.id = state.next_imported_artwork_id++;
   if (artwork.name.empty()) {
     artwork.name = "Artwork " + std::to_string(artwork.id);
@@ -530,7 +531,7 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
   EnsureContributingSourceArtworkId(artwork);
   EnsureImportedArtworkElementProvenance(artwork);
 
-  if (!state.working_areas.empty()) {
+  if (auto_place && !state.working_areas.empty()) {
     const float stagger =
         24.0f * static_cast<float>(state.imported_artwork.size());
     artwork.origin.x += state.working_areas.front().origin.x + stagger;
@@ -546,6 +547,7 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork) {
 
 void ClearImportedArtwork(CanvasState &state) {
   state.imported_artwork.clear();
+  state.imported_artwork_separation_preview = {};
   state.selected_imported_artwork_id = 0;
   ClearImportedDebugSelection(state);
   ClearSelectedImportedElements(state);

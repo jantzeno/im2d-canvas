@@ -9,6 +9,8 @@ void DrawImportedArtworkListWindow(im2d::CanvasState &state,
                                    const char *window_title);
 void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
                                         const char *window_title);
+void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,
+                                       const char *window_title);
 void DrawImportResultSummary(const im2d::importer::ImportResult &result);
 
 } // namespace demo

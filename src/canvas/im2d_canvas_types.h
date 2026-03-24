@@ -199,6 +199,35 @@ struct ImportedElementSelection {
   int item_id = 0;
 };
 
+enum class ImportedSeparationPreviewClassification {
+  Assigned,
+  Crossing,
+  Orphan,
+};
+
+struct ImportedSeparationPreviewPart {
+  ImportedSeparationPreviewClassification classification =
+      ImportedSeparationPreviewClassification::Assigned;
+  int bucket_index = -1;
+  int bucket_column = 0;
+  int bucket_row = 0;
+  ImVec2 world_bounds_min = ImVec2(0.0f, 0.0f);
+  ImVec2 world_bounds_max = ImVec2(0.0f, 0.0f);
+  std::vector<ImportedElementSelection> elements;
+};
+
+struct ImportedArtworkSeparationPreview {
+  bool active = false;
+  int artwork_id = 0;
+  int guide_id = 0;
+  std::vector<int> guide_ids;
+  int future_object_count = 0;
+  int skipped_count = 0;
+  std::vector<ImportedElementSelection> skipped_elements;
+  std::vector<ImportedSeparationPreviewPart> parts;
+  std::string message;
+};
+
 struct ImportedSourceReference {
   int source_artwork_id = 0;
   ImportedElementKind kind = ImportedElementKind::Path;
@@ -406,10 +435,12 @@ struct CanvasState {
   std::vector<ImportedArtwork> imported_artwork;
   bool show_imported_dxf_text = true;
   int selected_imported_artwork_id = 0;
+  int selected_guide_id = 0;
   ImportedDebugSelection selected_imported_debug;
   ImportedArtworkEditMode imported_artwork_edit_mode =
       ImportedArtworkEditMode::None;
   std::vector<ImportedElementSelection> selected_imported_elements;
+  ImportedArtworkSeparationPreview imported_artwork_separation_preview;
   ImportedArtworkOperationResult last_imported_artwork_operation;
   int last_imported_operation_issue_artwork_id = 0;
   std::vector<ImportedElementSelection> last_imported_operation_issue_elements;

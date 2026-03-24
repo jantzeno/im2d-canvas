@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
 
 #include <imgui_internal.h>
 
@@ -19,6 +20,9 @@ namespace {
 constexpr float kImportedPreviewStrokeWidth = 1.0f;
 constexpr float kImportedPreviewCurveFlatnessPixels = 0.35f;
 constexpr int kImportedPreviewCurveMaxSubdivisionDepth = 10;
+constexpr float kMarqueeDragStartDistancePixels = 4.0f;
+constexpr float kMarqueeOutlineThickness = 2.0f;
+constexpr float kMarqueeFillAlpha = 0.18f;
 
 enum class WorkingAreaHitZone {
   None,
@@ -42,8 +46,24 @@ struct ImportedArtworkHit {
   ImportedArtworkHitZone zone = ImportedArtworkHitZone::None;
 };
 
+bool ImportedPreviewCurveFlatEnough(const ImVec2 &start, const ImVec2 &control1,
+                                    const ImVec2 &control2, const ImVec2 &end);
+void AppendImportedSegmentPath(ImDrawList *draw_list, const CanvasState &state,
+                               const ImRect &canvas_rect,
+                               const ImportedArtwork &artwork,
+                               const std::vector<ImportedPathSegment> &segments,
+                               bool closed);
+std::vector<std::vector<ImVec2>>
+BuildGlyphFillPolygons(const ImportedTextGlyph &glyph);
+void AppendImportedTextContourPath(ImDrawList *draw_list,
+                                   const CanvasState &state,
+                                   const ImRect &canvas_rect,
+                                   const ImportedArtwork &artwork,
+                                   const ImportedTextContour &contour);
+
 struct TransientCanvasState {
   bool creating_guide = false;
+  bool marquee_armed = false;
   bool marquee_selecting = false;
   GuideOrientation pending_orientation = GuideOrientation::Vertical;
   float pending_position = 0.0f;
@@ -58,13 +78,42 @@ struct TransientCanvasState {
   int resizing_working_area_id = 0;
   ImVec2 imported_artwork_drag_offset = ImVec2(0.0f, 0.0f);
   ImVec2 working_area_drag_offset = ImVec2(0.0f, 0.0f);
+  ImVec2 marquee_press_screen = ImVec2(0.0f, 0.0f);
   ImVec2 marquee_start_world = ImVec2(0.0f, 0.0f);
   ImVec2 marquee_end_world = ImVec2(0.0f, 0.0f);
+  int last_selected_imported_artwork_id = 0;
 };
 
 TransientCanvasState &GetTransientCanvasState() {
   static TransientCanvasState state;
   return state;
+}
+
+void ResetMarqueeInteractionState(TransientCanvasState *state) {
+  state->marquee_armed = false;
+  state->marquee_selecting = false;
+  state->marquee_press_screen = ImVec2(0.0f, 0.0f);
+  state->marquee_start_world = ImVec2(0.0f, 0.0f);
+  state->marquee_end_world = ImVec2(0.0f, 0.0f);
+}
+
+void ClearActiveCanvasManipulation(TransientCanvasState *state) {
+  state->dragging_guide_id = 0;
+  state->dragging_imported_artwork_id = 0;
+  state->resizing_imported_artwork_id = 0;
+  state->dragging_working_area_id = 0;
+  state->resizing_working_area_id = 0;
+}
+
+void SelectImportedArtworkForCanvas(CanvasState &state,
+                                    TransientCanvasState *transient_state,
+                                    int artwork_id) {
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                   artwork_id, 0};
+  ClearSelectedImportedElements(state);
+  transient_state->selected_working_area_id = 0;
+  ResetMarqueeInteractionState(transient_state);
 }
 
 float ClampZoom(float zoom) { return std::clamp(zoom, 0.1f, 8.0f); }
@@ -79,6 +128,18 @@ ImVec2 ScreenToWorld(const CanvasState &state, const ImVec2 &canvas_min,
                      const ImVec2 &point) {
   return ImVec2((point.x - canvas_min.x - state.view.pan.x) / state.view.zoom,
                 (point.y - canvas_min.y - state.view.pan.y) / state.view.zoom);
+}
+
+void ArmMarqueeSelection(CanvasState &state,
+                         TransientCanvasState *transient_state,
+                         const ImVec2 &canvas_min, const ImVec2 &mouse_screen) {
+  ResetMarqueeInteractionState(transient_state);
+  ClearActiveCanvasManipulation(transient_state);
+  transient_state->marquee_armed = true;
+  transient_state->marquee_press_screen = mouse_screen;
+  transient_state->marquee_start_world =
+      ScreenToWorld(state, canvas_min, mouse_screen);
+  transient_state->marquee_end_world = transient_state->marquee_start_world;
 }
 
 ImRect WorkingAreaScreenRect(const CanvasState &state, const ImVec2 &canvas_min,
@@ -144,6 +205,24 @@ ImU32 ImportedIssueOverlayColor(uint32_t issue_flags) {
     return IM_COL32(232, 171, 62, 255);
   }
   return IM_COL32(240, 146, 61, 255);
+}
+
+struct PreviewOverlayColors {
+  ImU32 stroke = 0;
+  ImU32 fill = 0;
+};
+
+PreviewOverlayColors GetSeparationPreviewColors(
+    ImportedSeparationPreviewClassification classification) {
+  switch (classification) {
+  case ImportedSeparationPreviewClassification::Assigned:
+    return {IM_COL32(90, 160, 255, 235), IM_COL32(90, 160, 255, 52)};
+  case ImportedSeparationPreviewClassification::Crossing:
+    return {IM_COL32(242, 177, 52, 235), IM_COL32(242, 177, 52, 52)};
+  case ImportedSeparationPreviewClassification::Orphan:
+    return {IM_COL32(232, 84, 62, 235), IM_COL32(232, 84, 62, 44)};
+  }
+  return {IM_COL32(255, 255, 255, 255), IM_COL32(255, 255, 255, 32)};
 }
 
 bool TryGetImportedDebugScreenRect(const CanvasState &state,
@@ -228,6 +307,101 @@ float NiceStep(float raw_value) {
   }
 
   return nice_fraction * base;
+}
+
+int DecimalPlacesForStep(float step_units) {
+  if (step_units <= 0.0f) {
+    return 0;
+  }
+
+  float normalized = std::fabs(step_units);
+  int decimal_places = 0;
+  while (decimal_places < 6 &&
+         std::fabs(normalized - std::round(normalized)) > 0.0001f) {
+    normalized *= 10.0f;
+    ++decimal_places;
+  }
+
+  return decimal_places;
+}
+
+std::string FormatRulerTickLabel(float tick_units, float step_units) {
+  const int decimal_places = DecimalPlacesForStep(step_units);
+  char label[32];
+  std::snprintf(label, sizeof(label), "%.*f", decimal_places, tick_units);
+
+  std::string formatted(label);
+  if (formatted.find('.') != std::string::npos) {
+    while (!formatted.empty() && formatted.back() == '0') {
+      formatted.pop_back();
+    }
+    if (!formatted.empty() && formatted.back() == '.') {
+      formatted.pop_back();
+    }
+  }
+
+  if (formatted == "-0") {
+    return "0";
+  }
+
+  return formatted;
+}
+
+float ComputeLeftRulerThickness(const CanvasState &state,
+                                const ImRect &total_rect,
+                                float top_ruler_thickness,
+                                float minimum_thickness) {
+  const float pixels_per_unit =
+      UnitsToPixels(1.0f, state.ruler_unit, state.calibration) *
+      state.view.zoom;
+  if (pixels_per_unit <= 0.0f) {
+    return minimum_thickness;
+  }
+
+  const float major_step_units = NiceStep(80.0f / pixels_per_unit);
+  const float minor_step_units = major_step_units / 5.0f;
+  if (major_step_units <= 0.0f || minor_step_units <= 0.0f) {
+    return minimum_thickness;
+  }
+
+  const ImVec2 canvas_min(total_rect.Min.x + minimum_thickness,
+                          total_rect.Min.y + top_ruler_thickness);
+  const float visible_min_world =
+      ScreenToWorld(state, canvas_min, ImVec2(canvas_min.x, canvas_min.y)).y;
+  const float visible_max_world =
+      ScreenToWorld(state, canvas_min, ImVec2(canvas_min.x, total_rect.Max.y))
+          .y;
+
+  const float min_units =
+      PixelsToUnits(visible_min_world, state.ruler_unit, state.calibration);
+  const float max_units =
+      PixelsToUnits(visible_max_world, state.ruler_unit, state.calibration);
+  const float start_units =
+      std::floor(std::min(min_units, max_units) / minor_step_units) *
+      minor_step_units;
+  const float end_units =
+      std::ceil(std::max(min_units, max_units) / minor_step_units) *
+      minor_step_units;
+
+  float max_label_width = 0.0f;
+  for (float tick_units = start_units; tick_units <= end_units;
+       tick_units += minor_step_units) {
+    const float remainder = std::fmod(std::fabs(tick_units), major_step_units);
+    const bool major = remainder < 0.0001f ||
+                       std::fabs(remainder - major_step_units) < 0.0001f;
+    if (!major) {
+      continue;
+    }
+
+    const std::string label =
+        FormatRulerTickLabel(tick_units, major_step_units);
+    max_label_width =
+        std::max(max_label_width, ImGui::CalcTextSize(label.c_str()).x);
+  }
+
+  constexpr float kRulerLabelPadding = 4.0f;
+  return std::max(minimum_thickness,
+                  max_label_width + kRulerLabelPadding * 2.0f);
 }
 
 int FindHoveredGuide(const CanvasState &state, const ImVec2 &canvas_min,
@@ -348,6 +522,183 @@ bool IsLastOperationIssueElement(const CanvasState &state, int artwork_id,
       });
 }
 
+void DrawSeparationPreviewOverlay(ImDrawList *draw_list,
+                                  const CanvasState &state,
+                                  const ImRect &canvas_rect) {
+  const ImportedArtworkSeparationPreview &preview =
+      state.imported_artwork_separation_preview;
+  if (!preview.active) {
+    return;
+  }
+
+  draw_list->PushClipRect(canvas_rect.Min, canvas_rect.Max, true);
+  const ImVec2 banner_min(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f);
+  const ImVec2 banner_max(canvas_rect.Min.x + 360.0f,
+                          canvas_rect.Min.y + 72.0f);
+  draw_list->AddRectFilled(banner_min, banner_max, IM_COL32(20, 24, 34, 224),
+                           6.0f);
+  draw_list->AddRect(banner_min, banner_max, IM_COL32(140, 170, 220, 220), 6.0f,
+                     0, 1.5f);
+  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 10.0f),
+                     IM_COL32(230, 236, 248, 255),
+                     "Guide Split Preview Active");
+  const std::string preview_summary =
+      std::to_string(preview.future_object_count) + " objects, " +
+      std::to_string(preview.skipped_count) + " skipped";
+  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 34.0f),
+                     IM_COL32(180, 196, 228, 255), preview_summary.c_str());
+
+  ImRect preview_artwork_rect = canvas_rect;
+  if (const ImportedArtwork *artwork =
+          FindImportedArtwork(state, preview.artwork_id)) {
+    preview_artwork_rect =
+        ImportedArtworkScreenRect(state, canvas_rect.Min, *artwork);
+    preview_artwork_rect.ClipWith(canvas_rect);
+  }
+
+  std::vector<float> vertical_positions;
+  std::vector<float> horizontal_positions;
+  for (const int guide_id : preview.guide_ids) {
+    const Guide *guide = FindGuide(state, guide_id);
+    if (guide == nullptr) {
+      continue;
+    }
+    if (guide->orientation == GuideOrientation::Vertical) {
+      vertical_positions.push_back(guide->position);
+    } else {
+      horizontal_positions.push_back(guide->position);
+    }
+  }
+  std::sort(vertical_positions.begin(), vertical_positions.end());
+  std::sort(horizontal_positions.begin(), horizontal_positions.end());
+
+  struct PreviewBucketRegion {
+    int bucket_index = -1;
+    int bucket_column = 0;
+    int bucket_row = 0;
+    PreviewOverlayColors colors;
+  };
+
+  std::vector<PreviewBucketRegion> bucket_regions;
+  for (const ImportedSeparationPreviewPart &part : preview.parts) {
+    if (part.classification !=
+            ImportedSeparationPreviewClassification::Assigned ||
+        part.bucket_index < 0) {
+      continue;
+    }
+
+    const bool already_added =
+        std::any_of(bucket_regions.begin(), bucket_regions.end(),
+                    [&part](const PreviewBucketRegion &region) {
+                      return region.bucket_index == part.bucket_index;
+                    });
+    if (already_added) {
+      continue;
+    }
+
+    PreviewOverlayColors colors =
+        GetSeparationPreviewColors(part.classification);
+    constexpr ImU32 kBucketStrokes[] = {
+        IM_COL32(90, 160, 255, 235),  IM_COL32(92, 201, 110, 235),
+        IM_COL32(195, 120, 255, 235), IM_COL32(61, 201, 194, 235),
+        IM_COL32(255, 136, 92, 235),  IM_COL32(240, 210, 75, 235)};
+    constexpr ImU32 kBucketFills[] = {
+        IM_COL32(90, 160, 255, 28),  IM_COL32(92, 201, 110, 28),
+        IM_COL32(195, 120, 255, 28), IM_COL32(61, 201, 194, 28),
+        IM_COL32(255, 136, 92, 28),  IM_COL32(240, 210, 75, 28)};
+    const size_t palette_index =
+        static_cast<size_t>(part.bucket_index) % std::size(kBucketStrokes);
+    colors.stroke = kBucketStrokes[palette_index];
+    colors.fill = kBucketFills[palette_index];
+    bucket_regions.push_back(
+        {part.bucket_index, part.bucket_column, part.bucket_row, colors});
+  }
+
+  const ImVec2 visible_world_min =
+      ScreenToWorld(state, canvas_rect.Min, canvas_rect.Min);
+  const ImVec2 visible_world_max =
+      ScreenToWorld(state, canvas_rect.Min, canvas_rect.Max);
+
+  auto bucket_min_for = [](const std::vector<float> &positions, int index,
+                           float fallback_min) {
+    if (index <= 0 || positions.empty()) {
+      return fallback_min;
+    }
+    return positions[static_cast<size_t>(index - 1)];
+  };
+  auto bucket_max_for = [](const std::vector<float> &positions, int index,
+                           float fallback_max) {
+    if (positions.empty() || index >= static_cast<int>(positions.size())) {
+      return fallback_max;
+    }
+    return positions[static_cast<size_t>(index)];
+  };
+
+  for (const PreviewBucketRegion &region : bucket_regions) {
+    const float world_left = bucket_min_for(
+        vertical_positions, region.bucket_column, visible_world_min.x);
+    const float world_right = bucket_max_for(
+        vertical_positions, region.bucket_column, visible_world_max.x);
+    const float world_top = bucket_min_for(
+        horizontal_positions, region.bucket_row, visible_world_min.y);
+    const float world_bottom = bucket_max_for(
+        horizontal_positions, region.bucket_row, visible_world_max.y);
+    const ImRect band_screen_rect =
+        WorldRectToScreenRect(state, canvas_rect.Min,
+                              ImRect(ImVec2(world_left, world_top),
+                                     ImVec2(world_right, world_bottom)));
+    ImRect clipped_band_rect = band_screen_rect;
+    clipped_band_rect.ClipWith(preview_artwork_rect);
+    if (!clipped_band_rect.IsInverted()) {
+      draw_list->AddRectFilled(clipped_band_rect.Min, clipped_band_rect.Max,
+                               region.colors.fill);
+      draw_list->AddRect(clipped_band_rect.Min, clipped_band_rect.Max,
+                         region.colors.stroke, 0.0f, 0, 2.0f);
+
+      const std::string bucket_label =
+          "Band " + std::to_string(region.bucket_index + 1);
+      const ImVec2 label_pos(clipped_band_rect.Min.x + 10.0f,
+                             clipped_band_rect.Min.y + 10.0f);
+      draw_list->AddText(label_pos, region.colors.stroke, bucket_label.c_str());
+    }
+  }
+
+  for (const ImportedSeparationPreviewPart &part : preview.parts) {
+    PreviewOverlayColors colors =
+        GetSeparationPreviewColors(part.classification);
+    if (part.classification ==
+        ImportedSeparationPreviewClassification::Assigned) {
+      continue;
+    }
+
+    const ImRect screen_rect = WorldRectToScreenRect(
+        state, canvas_rect.Min,
+        ImRect(part.world_bounds_min, part.world_bounds_max));
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max, colors.stroke, 4.0f, 0,
+                       3.0f);
+
+    std::string label;
+    if (part.classification ==
+        ImportedSeparationPreviewClassification::Assigned) {
+      label = "B" + std::to_string(part.bucket_index + 1);
+    } else if (part.classification ==
+               ImportedSeparationPreviewClassification::Crossing) {
+      label = "Crossing";
+    } else {
+      label = "Orphan";
+    }
+
+    const ImVec2 label_min(screen_rect.Min.x + 4.0f, screen_rect.Min.y + 4.0f);
+    const ImVec2 label_max(label_min.x + 72.0f, label_min.y + 20.0f);
+    draw_list->AddRectFilled(label_min, label_max, IM_COL32(16, 18, 26, 220),
+                             4.0f);
+    draw_list->AddRect(label_min, label_max, colors.stroke, 4.0f, 0, 1.5f);
+    draw_list->AddText(ImVec2(label_min.x + 6.0f, label_min.y + 3.0f),
+                       colors.stroke, label.c_str());
+  }
+  draw_list->PopClipRect();
+}
+
 void RemoveGuide(CanvasState &state, int guide_id) {
   std::erase_if(state.guides, [guide_id](const Guide &guide) {
     return guide.id == guide_id;
@@ -365,6 +716,19 @@ ImVec2 CubicBezierPoint(const ImVec2 &start, const ImVec2 &control1,
                     3.0f * mt * t2 * control2.y + t2 * t * end.y);
 }
 
+bool PreviewPointsNear(const ImVec2 &a, const ImVec2 &b) {
+  const float dx = a.x - b.x;
+  const float dy = a.y - b.y;
+  return dx * dx + dy * dy <= 1.0f;
+}
+
+void AppendPreviewPathPoint(std::vector<ImVec2> *points, const ImVec2 &point) {
+  if (!points->empty() && PreviewPointsNear(points->back(), point)) {
+    return;
+  }
+  points->push_back(point);
+}
+
 float DistancePointToLineSquared(const ImVec2 &point, const ImVec2 &line_start,
                                  const ImVec2 &line_end) {
   const float dx = line_end.x - line_start.x;
@@ -376,10 +740,15 @@ float DistancePointToLineSquared(const ImVec2 &point, const ImVec2 &line_start,
     return px * px + py * py;
   }
 
-  const float numerator =
-      std::fabs(dy * point.x - dx * point.y + line_end.x * line_start.y -
-                line_end.y * line_start.x);
-  return (numerator * numerator) / line_length_squared;
+  const float t = std::clamp(
+      ((point.x - line_start.x) * dx + (point.y - line_start.y) * dy) /
+          line_length_squared,
+      0.0f, 1.0f);
+  const float projection_x = line_start.x + t * dx;
+  const float projection_y = line_start.y + t * dy;
+  const float px = point.x - projection_x;
+  const float py = point.y - projection_y;
+  return px * px + py * py;
 }
 
 bool ImportedPreviewCurveFlatEnough(const ImVec2 &start, const ImVec2 &control1,
@@ -389,23 +758,6 @@ bool ImportedPreviewCurveFlatEnough(const ImVec2 &start, const ImVec2 &control1,
   return DistancePointToLineSquared(control1, start, end) <=
              tolerance_squared &&
          DistancePointToLineSquared(control2, start, end) <= tolerance_squared;
-}
-
-bool PreviewPointsNear(const ImVec2 &a, const ImVec2 &b,
-                       float tolerance = 0.1f) {
-  const float dx = a.x - b.x;
-  const float dy = a.y - b.y;
-  return dx * dx + dy * dy <= tolerance * tolerance;
-}
-
-void AppendPreviewPathPoint(std::vector<ImVec2> *points, const ImVec2 &point) {
-  if (points == nullptr) {
-    return;
-  }
-  if (!points->empty() && PreviewPointsNear(points->back(), point)) {
-    return;
-  }
-  points->push_back(point);
 }
 
 void AppendAdaptiveImportedPreviewCurvePoints(std::vector<ImVec2> *points,
@@ -980,7 +1332,7 @@ void DrawImportedMarquee(ImDrawList *draw_list, const CanvasState &state,
       ImGui::ColorConvertFloat4ToU32(state.theme.guide_hovered);
   const ImU32 fill_color = ImGui::ColorConvertFloat4ToU32(
       ImVec4(state.theme.guide_hovered.x, state.theme.guide_hovered.y,
-             state.theme.guide_hovered.z, 0.18f));
+             state.theme.guide_hovered.z, kMarqueeFillAlpha));
 
   if (state.imported_artwork_edit_mode == ImportedArtworkEditMode::SelectOval) {
     const ImVec2 center(
@@ -990,14 +1342,15 @@ void DrawImportedMarquee(ImDrawList *draw_list, const CanvasState &state,
         (marquee_screen_rect.Max.x - marquee_screen_rect.Min.x) * 0.5f,
         (marquee_screen_rect.Max.y - marquee_screen_rect.Min.y) * 0.5f);
     draw_list->AddEllipseFilled(center, radius, fill_color);
-    draw_list->AddEllipse(center, radius, outline_color, 0, 2.0f);
+    draw_list->AddEllipse(center, radius, outline_color, 0,
+                          kMarqueeOutlineThickness);
     return;
   }
 
   draw_list->AddRectFilled(marquee_screen_rect.Min, marquee_screen_rect.Max,
                            fill_color, 3.0f);
   draw_list->AddRect(marquee_screen_rect.Min, marquee_screen_rect.Max,
-                     outline_color, 3.0f, 0, 2.0f);
+                     outline_color, 3.0f, 0, kMarqueeOutlineThickness);
 }
 
 void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
@@ -1139,6 +1492,8 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
     return;
   }
 
+  draw_list->PushClipRect(rect.Min, rect.Max, true);
+
   const float visible_min_world =
       horizontal ? ScreenToWorld(state, ImVec2(rect.Min.x, rect.Max.y),
                                  ImVec2(rect.Min.x, rect.Max.y))
@@ -1184,10 +1539,10 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
       draw_list->AddLine(ImVec2(x, rect.Max.y),
                          ImVec2(x, rect.Max.y - tick_length), tick_color, 1.0f);
       if (major) {
-        char label[32];
-        std::snprintf(label, sizeof(label), "%.3g", tick_units);
+        const std::string label =
+            FormatRulerTickLabel(tick_units, major_step_units);
         draw_list->AddText(ImVec2(x + 4.0f, rect.Min.y + 4.0f), text_color,
-                           label);
+                           label.c_str());
       }
     } else {
       const float y = WorldToScreen(state, ImVec2(rect.Max.x, rect.Min.y),
@@ -1196,13 +1551,18 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
       draw_list->AddLine(ImVec2(rect.Max.x, y),
                          ImVec2(rect.Max.x - tick_length, y), tick_color, 1.0f);
       if (major) {
-        char label[32];
-        std::snprintf(label, sizeof(label), "%.3g", tick_units);
-        draw_list->AddText(ImVec2(rect.Min.x + 4.0f, y + 2.0f), text_color,
-                           label);
+        const std::string label =
+            FormatRulerTickLabel(tick_units, major_step_units);
+        const float label_width = ImGui::CalcTextSize(label.c_str()).x;
+        const float label_x =
+            std::max(rect.Min.x + 4.0f, rect.Max.x - label_width - 4.0f);
+        draw_list->AddText(ImVec2(label_x, y + 2.0f), text_color,
+                           label.c_str());
       }
     }
   }
+
+  draw_list->PopClipRect();
 }
 
 } // namespace
@@ -1211,6 +1571,14 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   InitializeDefaultDocument(state);
   TransientCanvasState &transient_state = GetTransientCanvasState();
   ImGuiIO &io = ImGui::GetIO();
+
+  if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+      transient_state.last_selected_imported_artwork_id !=
+          state.selected_imported_artwork_id) {
+    ResetMarqueeInteractionState(&transient_state);
+    transient_state.last_selected_imported_artwork_id =
+        state.selected_imported_artwork_id;
+  }
 
   const ImVec2 canvas_size = ImGui::GetContentRegionAvail();
   if (canvas_size.x <= 2.0f || canvas_size.y <= 2.0f) {
@@ -1224,17 +1592,20 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                              ImGuiButtonFlags_MouseButtonMiddle);
 
   const ImRect total_rect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax());
+  const float top_ruler_thickness = options.ruler_thickness;
+  const float left_ruler_thickness = ComputeLeftRulerThickness(
+      state, total_rect, top_ruler_thickness, options.ruler_thickness);
   const ImRect top_ruler_rect(
-      ImVec2(total_rect.Min.x + options.ruler_thickness, total_rect.Min.y),
-      ImVec2(total_rect.Max.x, total_rect.Min.y + options.ruler_thickness));
+      ImVec2(total_rect.Min.x + left_ruler_thickness, total_rect.Min.y),
+      ImVec2(total_rect.Max.x, total_rect.Min.y + top_ruler_thickness));
   const ImRect left_ruler_rect(
-      ImVec2(total_rect.Min.x, total_rect.Min.y + options.ruler_thickness),
-      ImVec2(total_rect.Min.x + options.ruler_thickness, total_rect.Max.y));
+      ImVec2(total_rect.Min.x, total_rect.Min.y + top_ruler_thickness),
+      ImVec2(total_rect.Min.x + left_ruler_thickness, total_rect.Max.y));
   const ImRect corner_rect(total_rect.Min,
-                           ImVec2(total_rect.Min.x + options.ruler_thickness,
-                                  total_rect.Min.y + options.ruler_thickness));
-  const ImRect canvas_rect(ImVec2(total_rect.Min.x + options.ruler_thickness,
-                                  total_rect.Min.y + options.ruler_thickness),
+                           ImVec2(total_rect.Min.x + left_ruler_thickness,
+                                  total_rect.Min.y + top_ruler_thickness));
+  const ImRect canvas_rect(ImVec2(total_rect.Min.x + left_ruler_thickness,
+                                  total_rect.Min.y + top_ruler_thickness),
                            total_rect.Max);
 
   ImDrawList *draw_list = ImGui::GetWindowDrawList();
@@ -1312,48 +1683,50 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
 
   if (!transient_state.creating_guide && canvas_hovered &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-    if (marquee_mode_active) {
-      transient_state.marquee_selecting = true;
-      transient_state.marquee_start_world =
-          ScreenToWorld(state, canvas_rect.Min, io.MousePos);
-      transient_state.marquee_end_world = transient_state.marquee_start_world;
-      transient_state.dragging_guide_id = 0;
-      transient_state.dragging_imported_artwork_id = 0;
-      transient_state.resizing_imported_artwork_id = 0;
-      transient_state.dragging_working_area_id = 0;
-      transient_state.resizing_working_area_id = 0;
-    } else if (hovered_guide_id != 0) {
+    if (hovered_guide_id != 0) {
       if (Guide *guide = FindGuide(state, hovered_guide_id);
           guide != nullptr && !guide->locked) {
+        ResetMarqueeInteractionState(&transient_state);
         transient_state.dragging_guide_id = hovered_guide_id;
       }
     } else if (imported_artwork_hit.id != 0) {
-      state.selected_imported_artwork_id = imported_artwork_hit.id;
-      state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
-                                       imported_artwork_hit.id, 0};
-      ClearSelectedImportedElements(state);
-      transient_state.selected_working_area_id = 0;
-      if (ImportedArtwork *artwork =
-              FindImportedArtwork(state, imported_artwork_hit.id);
-          artwork != nullptr) {
-        const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
-        if (imported_artwork_hit.zone == ImportedArtworkHitZone::ResizeHandle &&
-            HasImportedArtworkFlag(artwork->flags,
-                                   ImportedArtworkFlagResizable)) {
-          transient_state.resizing_imported_artwork_id =
-              imported_artwork_hit.id;
-          transient_state.imported_artwork_resize_initial_scale =
-              artwork->scale;
-        } else if (imported_artwork_hit.zone == ImportedArtworkHitZone::Body &&
-                   HasImportedArtworkFlag(artwork->flags,
-                                          ImportedArtworkFlagMovable)) {
-          transient_state.dragging_imported_artwork_id =
-              imported_artwork_hit.id;
-          transient_state.imported_artwork_drag_offset =
-              ImVec2(world.x - artwork->origin.x, world.y - artwork->origin.y);
+      if (marquee_mode_active) {
+        if (state.selected_imported_artwork_id != imported_artwork_hit.id) {
+          SelectImportedArtworkForCanvas(state, &transient_state,
+                                         imported_artwork_hit.id);
+        } else {
+          ArmMarqueeSelection(state, &transient_state, canvas_rect.Min,
+                              io.MousePos);
+        }
+      } else {
+        SelectImportedArtworkForCanvas(state, &transient_state,
+                                       imported_artwork_hit.id);
+        if (ImportedArtwork *artwork =
+                FindImportedArtwork(state, imported_artwork_hit.id);
+            artwork != nullptr) {
+          const ImVec2 world =
+              ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+          if (imported_artwork_hit.zone ==
+                  ImportedArtworkHitZone::ResizeHandle &&
+              HasImportedArtworkFlag(artwork->flags,
+                                     ImportedArtworkFlagResizable)) {
+            transient_state.resizing_imported_artwork_id =
+                imported_artwork_hit.id;
+            transient_state.imported_artwork_resize_initial_scale =
+                artwork->scale;
+          } else if (imported_artwork_hit.zone ==
+                         ImportedArtworkHitZone::Body &&
+                     HasImportedArtworkFlag(artwork->flags,
+                                            ImportedArtworkFlagMovable)) {
+            transient_state.dragging_imported_artwork_id =
+                imported_artwork_hit.id;
+            transient_state.imported_artwork_drag_offset = ImVec2(
+                world.x - artwork->origin.x, world.y - artwork->origin.y);
+          }
         }
       }
     } else if (area_hit.id != 0) {
+      ResetMarqueeInteractionState(&transient_state);
       transient_state.selected_working_area_id = area_hit.id;
       state.selected_imported_artwork_id = 0;
       ClearImportedDebugSelection(state);
@@ -1372,10 +1745,34 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         }
       }
     } else {
-      state.selected_imported_artwork_id = 0;
-      transient_state.selected_working_area_id = 0;
-      ClearImportedDebugSelection(state);
-      ClearSelectedImportedElements(state);
+      if (marquee_mode_active && state.selected_imported_artwork_id != 0) {
+        ArmMarqueeSelection(state, &transient_state, canvas_rect.Min,
+                            io.MousePos);
+      } else {
+        ResetMarqueeInteractionState(&transient_state);
+        state.selected_imported_artwork_id = 0;
+        transient_state.selected_working_area_id = 0;
+        ClearImportedDebugSelection(state);
+        ClearSelectedImportedElements(state);
+      }
+    }
+  }
+
+  if (transient_state.marquee_armed && !transient_state.marquee_selecting) {
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+      const ImVec2 drag_delta(
+          io.MousePos.x - transient_state.marquee_press_screen.x,
+          io.MousePos.y - transient_state.marquee_press_screen.y);
+      const float drag_distance_squared =
+          drag_delta.x * drag_delta.x + drag_delta.y * drag_delta.y;
+      if (drag_distance_squared >=
+          kMarqueeDragStartDistancePixels * kMarqueeDragStartDistancePixels) {
+        transient_state.marquee_selecting = true;
+        transient_state.marquee_end_world =
+            ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+      }
+    } else {
+      ResetMarqueeInteractionState(&transient_state);
     }
   }
 
@@ -1388,7 +1785,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
           state, state.selected_imported_artwork_id,
           transient_state.marquee_start_world,
           transient_state.marquee_end_world, state.imported_artwork_edit_mode);
-      transient_state.marquee_selecting = false;
+      ResetMarqueeInteractionState(&transient_state);
     }
   }
 
@@ -1396,6 +1793,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
       if (Guide *guide = FindGuide(state, transient_state.dragging_guide_id);
           guide != nullptr) {
+        state.selected_guide_id = guide->id;
         const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
         const float raw_position =
             guide->orientation == GuideOrientation::Vertical ? world.x
@@ -1513,6 +1911,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   } else if (hovered_guide_id != 0 &&
              ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     transient_state.context_guide_id = hovered_guide_id;
+    state.selected_guide_id = hovered_guide_id;
     ImGui::OpenPopup("guide_context_menu");
   } else if ((top_ruler_hovered || left_ruler_hovered) &&
              ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
@@ -1526,6 +1925,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                    transient_state.selected_working_area_id, options);
   DrawImportedArtwork(draw_list, state, canvas_rect,
                       state.selected_imported_artwork_id, options);
+  DrawSeparationPreviewOverlay(draw_list, state, canvas_rect);
   DrawGuides(draw_list, state, canvas_rect, hovered_guide_id, transient_state);
   DrawImportedMarquee(draw_list, state, canvas_rect, transient_state);
   DrawRulerAxis(draw_list, state, top_ruler_rect, true);
@@ -1607,19 +2007,21 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   if (ImGui::BeginPopup("guide_context_menu")) {
     if (Guide *guide = FindGuide(state, transient_state.context_guide_id);
         guide != nullptr) {
-      if (state.selected_imported_artwork_id != 0 &&
-          ImGui::MenuItem("Split Selected Artwork At Guide")) {
-        SeparateImportedArtworkByGuide(
-            state, state.selected_imported_artwork_id, guide->id);
-        ImGui::CloseCurrentPopup();
-      }
-      if (state.selected_imported_artwork_id != 0) {
-        ImGui::Separator();
-      }
       if (ImGui::MenuItem(guide->locked ? "Unlock guide" : "Lock guide")) {
         guide->locked = !guide->locked;
       }
       if (ImGui::MenuItem("Delete guide")) {
+        if (state.imported_artwork_separation_preview.active &&
+            std::find(
+                state.imported_artwork_separation_preview.guide_ids.begin(),
+                state.imported_artwork_separation_preview.guide_ids.end(),
+                guide->id) !=
+                state.imported_artwork_separation_preview.guide_ids.end()) {
+          ClearImportedArtworkSeparationPreview(state);
+        }
+        if (state.selected_guide_id == guide->id) {
+          state.selected_guide_id = 0;
+        }
         RemoveGuide(state, guide->id);
         transient_state.context_guide_id = 0;
         ImGui::CloseCurrentPopup();

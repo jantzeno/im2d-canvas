@@ -212,6 +212,7 @@ void DrawImportInspector(CanvasState &state) {
 
   demo::DrawImportedArtworkListWindow(state, "Canvas Objects");
   demo::DrawImportedArtworkInspectorWindow(state, "Object Inspector");
+  demo::DrawImportedArtworkWorkflowWindow(state, "Object Workflow");
 }
 
 } // namespace

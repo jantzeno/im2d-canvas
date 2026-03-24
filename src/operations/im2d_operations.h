@@ -22,6 +22,10 @@ UpdateImportedArtworkOutlineColor(CanvasState &state, int imported_artwork_id,
 ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
+PreviewSeparateImportedArtworkByGuide(CanvasState &state,
+                                      int imported_artwork_id, int guide_id);
+void ClearImportedArtworkSeparationPreview(CanvasState &state);
+ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
                                int guide_id);
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id);
