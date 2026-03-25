@@ -9,6 +9,11 @@ void DrawImportedArtworkTransientUi(im2d::CanvasState &state);
 void DrawImportedArtworkListContents(im2d::CanvasState &state);
 void DrawImportedArtworkListWindow(im2d::CanvasState &state,
                                    const char *window_title);
+void DrawImportedArtworkSvgExportContents(im2d::CanvasState &state);
+void DrawImportedArtworkCanvasOperationsContents(im2d::CanvasState &state);
+void DrawImportedArtworkCutOperationsContents(im2d::CanvasState &state);
+void DrawImportedArtworkObjectInspectorSectionContents(
+    im2d::CanvasState &state);
 void DrawImportedArtworkInspectorContents(im2d::CanvasState &state);
 void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
                                         const char *window_title);

@@ -456,14 +456,6 @@ std::filesystem::path BuildExportPath(const std::array<char, 256> &directory,
   return std::filesystem::path(directory_text) / filename_text;
 }
 
-bool HasAnyDxfArtwork(const im2d::CanvasState &state) {
-  return std::any_of(state.imported_artwork.begin(),
-                     state.imported_artwork.end(),
-                     [](const im2d::ImportedArtwork &artwork) {
-                       return artwork.source_format == "DXF";
-                     });
-}
-
 std::string SvgExportSummary(const im2d::exporter::SvgExportResult &result) {
   if (result.message.empty()) {
     return {};
@@ -1001,165 +993,141 @@ void DrawImportedArtworkTransientUi(im2d::CanvasState &state) {
   DrawPrepareForCuttingModal(state);
 }
 
-void DrawImportedArtworkListContents(im2d::CanvasState &state) {
-  ImGui::Text("Imported Objects: %d",
-              static_cast<int>(state.imported_artwork.size()));
-  if (HasAnyDxfArtwork(state)) {
-    ImGui::Checkbox("Show Imported DXF Text", &state.show_imported_dxf_text);
-  }
-  ImGui::Separator();
+namespace {
 
-  if (state.imported_artwork.empty()) {
-    ImGui::TextUnformatted("No imported objects on the canvas.");
-    return;
-  }
-
-  for (im2d::ImportedArtwork &artwork : state.imported_artwork) {
-    ImGui::PushID(artwork.id);
-    ImGui::Checkbox("##visible", &artwork.visible);
-    ImGui::SameLine();
-    const std::string label = artwork.name + " [" + artwork.source_format + "]";
-    if (ImGui::Selectable(label.c_str(),
-                          state.selected_imported_artwork_id == artwork.id)) {
-      SelectImportedArtwork(state, artwork.id);
-    }
-    ImGui::PopID();
-  }
-}
-
-void DrawImportedArtworkListWindow(im2d::CanvasState &state,
-                                   const char *window_title) {
-  ImGui::Begin(window_title);
-  DrawImportedArtworkListContents(state);
-  ImGui::End();
-}
-
-void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
+im2d::ImportedArtwork *
+ResolveSelectedImportedArtworkForUi(im2d::CanvasState &state) {
   im2d::ImportedArtwork *artwork =
       im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
-  if (artwork == nullptr) {
-    if (state.selected_imported_artwork_id != 0) {
-      state.selected_imported_artwork_id = 0;
-      im2d::ClearImportedDebugSelection(state);
-      im2d::ClearSelectedImportedElements(state);
-    }
-    ImGui::TextUnformatted("Select an imported object to inspect it.");
-    return;
+  if (artwork != nullptr) {
+    return artwork;
   }
+  if (state.selected_imported_artwork_id != 0) {
+    state.selected_imported_artwork_id = 0;
+    im2d::ClearImportedDebugSelection(state);
+    im2d::ClearSelectedImportedElements(state);
+  }
+  return nullptr;
+}
 
-  ImGui::Text("ID: %d", artwork->id);
-  ImGui::TextUnformatted(artwork->name.c_str());
+void DrawImportedArtworkCanvasOverviewContents(im2d::CanvasState &state,
+                                               im2d::ImportedArtwork &artwork) {
+  ImGui::Text("ID: %d", artwork.id);
+  ImGui::TextUnformatted(artwork.name.c_str());
   ImGui::Separator();
-  ImGui::Text("Format: %s", artwork->source_format.c_str());
-  ImGui::TextWrapped("Source: %s", artwork->source_path.c_str());
-  ImGui::Checkbox("Visible", &artwork->visible);
-  if (artwork->source_format == "DXF") {
+  ImGui::Text("Format: %s", artwork.source_format.c_str());
+  ImGui::TextWrapped("Source: %s", artwork.source_path.c_str());
+  ImGui::Checkbox("Visible", &artwork.visible);
+  if (artwork.source_format == "DXF") {
     ImGui::Checkbox("Show Imported DXF Text", &state.show_imported_dxf_text);
   }
 
-  float position[2] = {artwork->origin.x, artwork->origin.y};
+  float position[2] = {artwork.origin.x, artwork.origin.y};
   if (ImGui::InputFloat2("Position", position, "%.2f")) {
-    artwork->origin = ImVec2(position[0], position[1]);
+    artwork.origin = ImVec2(position[0], position[1]);
   }
   ImGui::SameLine();
   if (ImGui::Button("Reset Position")) {
-    artwork->origin = ImVec2(0.0f, 0.0f);
+    artwork.origin = ImVec2(0.0f, 0.0f);
   }
 
-  float scale[2] = {artwork->scale.x, artwork->scale.y};
+  float scale[2] = {artwork.scale.x, artwork.scale.y};
   if (ImGui::InputFloat2("Scale", scale, "%.3f")) {
-    artwork->scale =
+    artwork.scale =
         ImVec2(std::max(scale[0], 0.01f), std::max(scale[1], 0.01f));
   }
   ImGui::SameLine();
   if (ImGui::Button("Reset Scale")) {
-    artwork->scale = ImVec2(1.0f, 1.0f);
+    artwork.scale = ImVec2(1.0f, 1.0f);
   }
 
   bool lock_scale_ratio =
-      im2d::operations::IsImportedArtworkScaleRatioLocked(*artwork);
+      im2d::operations::IsImportedArtworkScaleRatioLocked(artwork);
   if (ImGui::Checkbox("Lock Scale Ratio", &lock_scale_ratio)) {
-    im2d::operations::SetImportedArtworkScaleRatioLocked(*artwork,
+    im2d::operations::SetImportedArtworkScaleRatioLocked(artwork,
                                                          lock_scale_ratio);
   }
 
-  float scale_x = artwork->scale.x;
+  float scale_x = artwork.scale.x;
   if (ImGui::InputFloat("Scale X", &scale_x, 0.0f, 0.0f, "%.3f")) {
-    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 0, scale_x);
+    im2d::operations::UpdateImportedArtworkScaleAxis(artwork, 0, scale_x);
   }
 
-  float scale_y = artwork->scale.y;
+  float scale_y = artwork.scale.y;
   if (ImGui::InputFloat("Scale Y", &scale_y, 0.0f, 0.0f, "%.3f")) {
-    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 1, scale_y);
+    im2d::operations::UpdateImportedArtworkScaleAxis(artwork, 1, scale_y);
   }
 
-  ImGui::DragFloat2("Adjust Position", &artwork->origin.x, 1.0f, 0.0f, 0.0f,
+  ImGui::DragFloat2("Adjust Position", &artwork.origin.x, 1.0f, 0.0f, 0.0f,
                     "%.2f");
-  float drag_scale_x = artwork->scale.x;
+  float drag_scale_x = artwork.scale.x;
   if (ImGui::DragFloat("Adjust Scale X", &drag_scale_x, 0.01f, 0.01f, 100.0f,
                        "%.3f")) {
-    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 0, drag_scale_x);
+    im2d::operations::UpdateImportedArtworkScaleAxis(artwork, 0, drag_scale_x);
   }
 
-  float drag_scale_y = artwork->scale.y;
+  float drag_scale_y = artwork.scale.y;
   if (ImGui::DragFloat("Adjust Scale Y", &drag_scale_y, 0.01f, 0.01f, 100.0f,
                        "%.3f")) {
-    im2d::operations::UpdateImportedArtworkScaleAxis(*artwork, 1, drag_scale_y);
+    im2d::operations::UpdateImportedArtworkScaleAxis(artwork, 1, drag_scale_y);
   }
 
   ImGui::Text("Bounds: %.1f x %.1f",
-              artwork->bounds_max.x - artwork->bounds_min.x,
-              artwork->bounds_max.y - artwork->bounds_min.y);
-  ImGui::Text("Part ID: %d", artwork->part.part_id);
-  ImGui::Text("Source Artwork ID: %d", artwork->part.source_artwork_id);
-  ImGui::Text("Cut Ready: %s", artwork->part.cut_ready ? "Yes" : "No");
-  ImGui::Text("Nest Ready: %s", artwork->part.nest_ready ? "Yes" : "No");
-  ImGui::Text("Islands: %d", artwork->part.island_count);
-  ImGui::Text("Outer Boundaries: %d", artwork->part.outer_contour_count);
-  ImGui::Text("Hole Contours: %d", artwork->part.hole_contour_count);
-  ImGui::Text("Attached Holes: %d", artwork->part.attached_hole_count);
-  ImGui::Text("Orphan Holes: %d", artwork->part.orphan_hole_count);
-  ImGui::Text("Ambiguous Cleanup: %d", artwork->part.ambiguous_contour_count);
-  ImGui::Text("Closed Contours: %d", artwork->part.closed_contour_count);
-  ImGui::Text("Open Contours: %d", artwork->part.open_contour_count);
-  ImGui::Text("Placeholder Text: %d", artwork->part.placeholder_count);
-  if (!artwork->part.contributing_source_artwork_ids.empty()) {
+              artwork.bounds_max.x - artwork.bounds_min.x,
+              artwork.bounds_max.y - artwork.bounds_min.y);
+  ImGui::Text("Part ID: %d", artwork.part.part_id);
+  ImGui::Text("Source Artwork ID: %d", artwork.part.source_artwork_id);
+  ImGui::Text("Cut Ready: %s", artwork.part.cut_ready ? "Yes" : "No");
+  ImGui::Text("Nest Ready: %s", artwork.part.nest_ready ? "Yes" : "No");
+  ImGui::Text("Islands: %d", artwork.part.island_count);
+  ImGui::Text("Outer Boundaries: %d", artwork.part.outer_contour_count);
+  ImGui::Text("Hole Contours: %d", artwork.part.hole_contour_count);
+  ImGui::Text("Attached Holes: %d", artwork.part.attached_hole_count);
+  ImGui::Text("Orphan Holes: %d", artwork.part.orphan_hole_count);
+  ImGui::Text("Ambiguous Cleanup: %d", artwork.part.ambiguous_contour_count);
+  ImGui::Text("Closed Contours: %d", artwork.part.closed_contour_count);
+  ImGui::Text("Open Contours: %d", artwork.part.open_contour_count);
+  ImGui::Text("Placeholder Text: %d", artwork.part.placeholder_count);
+  if (!artwork.part.contributing_source_artwork_ids.empty()) {
     std::string provenance = "Provenance: ";
     for (size_t index = 0;
-         index < artwork->part.contributing_source_artwork_ids.size();
-         ++index) {
+         index < artwork.part.contributing_source_artwork_ids.size(); ++index) {
       if (index != 0) {
         provenance += ", ";
       }
       provenance +=
-          std::to_string(artwork->part.contributing_source_artwork_ids[index]);
+          std::to_string(artwork.part.contributing_source_artwork_ids[index]);
     }
     ImGui::TextWrapped("%s", provenance.c_str());
   }
   ImGui::Text("Groups: %d",
-              std::max(static_cast<int>(artwork->groups.size()) - 1, 0));
-  ImGui::Text("Paths: %d", static_cast<int>(artwork->paths.size()));
-  ImGui::Text("DXF Text: %d", static_cast<int>(artwork->dxf_text.size()));
+              std::max(static_cast<int>(artwork.groups.size()) - 1, 0));
+  ImGui::Text("Paths: %d", static_cast<int>(artwork.paths.size()));
+  ImGui::Text("DXF Text: %d", static_cast<int>(artwork.dxf_text.size()));
   ImGui::Text("Selected Elements: %d",
               static_cast<int>(state.selected_imported_elements.size()));
-  if (state.last_imported_operation_issue_artwork_id == artwork->id &&
+  if (state.last_imported_operation_issue_artwork_id == artwork.id &&
       !state.last_imported_operation_issue_elements.empty()) {
     ImGui::Text(
         "Skipped By Last Op: %d",
         static_cast<int>(state.last_imported_operation_issue_elements.size()));
   }
   ImVec4 outline_color =
-      !artwork->paths.empty()
-          ? artwork->paths.front().stroke_color
-          : (!artwork->dxf_text.empty() ? artwork->dxf_text.front().stroke_color
-                                        : ImVec4(0.92f, 0.94f, 0.97f, 1.0f));
+      !artwork.paths.empty()
+          ? artwork.paths.front().stroke_color
+          : (!artwork.dxf_text.empty() ? artwork.dxf_text.front().stroke_color
+                                       : ImVec4(0.92f, 0.94f, 0.97f, 1.0f));
   if (ImGui::ColorEdit4("Outline Color", &outline_color.x,
                         ImGuiColorEditFlags_Float)) {
-    im2d::operations::UpdateImportedArtworkOutlineColor(state, artwork->id,
+    im2d::operations::UpdateImportedArtworkOutlineColor(state, artwork.id,
                                                         outline_color);
   }
+}
 
+void DrawImportedArtworkObjectInspectorContentsInternal(
+    im2d::CanvasState &state, im2d::ImportedArtwork &artwork) {
   ImportedInspectorFilterMode &filter_mode = GetImportedInspectorFilterMode();
+  ImGui::Text("Artwork: %s", artwork.name.c_str());
   ImGui::TextUnformatted("Inspector Filter");
   if (ImGui::RadioButton(
           "Hierarchy", filter_mode == ImportedInspectorFilterMode::Hierarchy)) {
@@ -1182,25 +1150,27 @@ void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
     filter_mode = ImportedInspectorFilterMode::FlaggedOrSkipped;
   }
 
-  DrawSelectedImportedItemDetails(*artwork, state);
+  DrawSelectedImportedItemDetails(artwork, state);
 
   if (filter_mode == ImportedInspectorFilterMode::Hierarchy) {
-    DrawImportedDebugTree(state, *artwork);
+    DrawImportedDebugTree(state, artwork);
   } else {
-    DrawFilteredImportedItems(state, *artwork, filter_mode);
+    DrawFilteredImportedItems(state, artwork, filter_mode);
   }
+}
 
+void DrawImportedArtworkSvgExportContentsInternal(
+    im2d::CanvasState &state, im2d::ImportedArtwork &artwork) {
   SvgExportUiState &export_ui = GetSvgExportUiState();
-  SyncSvgExportUiState(&export_ui, state, *artwork);
+  SyncSvgExportUiState(&export_ui, state, artwork);
   const std::filesystem::path selection_export_path =
       BuildExportPath(export_ui.output_directory, export_ui.selection_filename,
-                      DefaultSelectionExportPath(*artwork));
+                      DefaultSelectionExportPath(artwork));
   const std::filesystem::path export_area_path = BuildExportPath(
       export_ui.output_directory, export_ui.export_area_filename,
       DefaultExportAreaPath(state));
   const bool has_selected_elements = !state.selected_imported_elements.empty();
 
-  ImGui::Separator();
   ImGui::TextUnformatted("SVG Export");
   ImGui::Checkbox("Allow Placeholder DXF Export (Diagnostics)",
                   &export_ui.allow_placeholder_text);
@@ -1213,21 +1183,20 @@ void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
   if (ImGui::Button("Reset Export Paths")) {
     export_ui.configured_artwork_id = 0;
     export_ui.configured_export_area_id = 0;
-    SyncSvgExportUiState(&export_ui, state, *artwork);
+    SyncSvgExportUiState(&export_ui, state, artwork);
   }
   ImGui::TextWrapped("Selection Save Path: %s",
                      selection_export_path.lexically_normal().string().c_str());
   ImGui::TextWrapped("Export-Area Save Path: %s",
                      export_area_path.lexically_normal().string().c_str());
 
-  ImGui::SameLine();
   if (!has_selected_elements) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Preview Selection SVG")) {
     im2d::exporter::SvgExportRequest request;
     request.scope = im2d::exporter::SvgExportScope::ActiveSelection;
-    request.imported_artwork_id = artwork->id;
+    request.imported_artwork_id = artwork.id;
     request.allow_placeholder_text = export_ui.allow_placeholder_text;
     GetSvgExportPreview() = im2d::exporter::ExportSvg(state, request);
   }
@@ -1241,7 +1210,7 @@ void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
   if (ImGui::Button("Save Selection SVG")) {
     im2d::exporter::SvgExportRequest request;
     request.scope = im2d::exporter::SvgExportScope::ActiveSelection;
-    request.imported_artwork_id = artwork->id;
+    request.imported_artwork_id = artwork.id;
     request.allow_placeholder_text = export_ui.allow_placeholder_text;
     GetSvgExportPreview() =
         im2d::exporter::ExportSvgToFile(state, request, selection_export_path);
@@ -1292,79 +1261,194 @@ void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
     ImGui::TextWrapped("%s", SvgExportSummary(GetSvgExportPreview()).c_str());
     DrawSvgExportWarnings(GetSvgExportPreview());
   }
+}
 
+void DrawImportedArtworkOperationStatusContents(
+    im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
   const im2d::ImportedArtworkOperationResult &operation =
       state.last_imported_artwork_operation;
-  if (!operation.message.empty()) {
-    ImGui::Separator();
-    ImGui::TextWrapped("%s", operation.message.c_str());
-    if (operation.artwork_id == artwork->id ||
-        operation.created_artwork_id == artwork->id) {
-      if (operation.selected_count > 0) {
-        ImGui::Text("Selected: %d", operation.selected_count);
-      }
-      if (operation.moved_count > 0) {
-        ImGui::Text("Moved: %d", operation.moved_count);
-      }
-      if (operation.skipped_count > 0) {
-        ImGui::Text("Skipped: %d", operation.skipped_count);
-        if (state.last_imported_operation_issue_artwork_id == artwork->id &&
-            !state.last_imported_operation_issue_elements.empty()) {
-          if (ImGui::Button("Select Skipped Elements")) {
-            SelectLastOperationIssueElements(state, artwork->id);
-          }
-        }
-      }
-      if (operation.stitched_count > 0 || operation.cleaned_count > 0 ||
-          operation.ambiguous_count > 0 || operation.closed_count > 0 ||
-          operation.open_count > 0 || operation.placeholder_count > 0 ||
-          operation.preserved_count > 0) {
-        const bool operation_is_prepare =
-            operation.message.rfind("Prepare", 0) == 0;
-        if (operation_is_prepare) {
-          ImGui::Text(
-              "Mode: %s",
-              operation.prepare_mode ==
-                      im2d::ImportedArtworkPrepareMode::AggressiveCleanup
-                  ? "Prepare + Weld Cleanup"
-                  : "Prepare For Cutting");
-        }
-        ImGui::Text("Part ID: %d", operation.part_id);
-        ImGui::Text("Cut Ready: %s", operation.cut_ready ? "Yes" : "No");
-        ImGui::Text("Nest Ready: %s", operation.nest_ready ? "Yes" : "No");
-        ImGui::Text("Islands: %d", operation.island_count);
-        ImGui::Text("Outer: %d", operation.outer_count);
-        ImGui::Text("Holes: %d", operation.hole_count);
-        ImGui::Text("Attached Holes: %d", operation.attached_hole_count);
-        ImGui::Text("Orphan Holes: %d", operation.orphan_hole_count);
-        ImGui::Text("Preserved: %d", operation.preserved_count);
-        ImGui::Text("Stitched: %d", operation.stitched_count);
-        ImGui::Text("Cleaned: %d", operation.cleaned_count);
-        ImGui::Text("Ambiguous Cleanup: %d", operation.ambiguous_count);
-        ImGui::Text("Closed: %d", operation.closed_count);
-        ImGui::Text("Open: %d", operation.open_count);
-        ImGui::Text("Placeholder: %d", operation.placeholder_count);
+  if (operation.message.empty()) {
+    return;
+  }
+
+  ImGui::TextWrapped("%s", operation.message.c_str());
+  if (operation.artwork_id != artwork.id &&
+      operation.created_artwork_id != artwork.id) {
+    return;
+  }
+
+  if (operation.selected_count > 0) {
+    ImGui::Text("Selected: %d", operation.selected_count);
+  }
+  if (operation.moved_count > 0) {
+    ImGui::Text("Moved: %d", operation.moved_count);
+  }
+  if (operation.skipped_count > 0) {
+    ImGui::Text("Skipped: %d", operation.skipped_count);
+    if (state.last_imported_operation_issue_artwork_id == artwork.id &&
+        !state.last_imported_operation_issue_elements.empty()) {
+      if (ImGui::Button("Select Skipped Elements")) {
+        SelectLastOperationIssueElements(state, artwork.id);
       }
     }
   }
+  if (operation.stitched_count > 0 || operation.cleaned_count > 0 ||
+      operation.ambiguous_count > 0 || operation.closed_count > 0 ||
+      operation.open_count > 0 || operation.placeholder_count > 0 ||
+      operation.preserved_count > 0) {
+    const bool operation_is_prepare =
+        operation.message.rfind("Prepare", 0) == 0;
+    if (operation_is_prepare) {
+      ImGui::Text("Mode: %s",
+                  operation.prepare_mode ==
+                          im2d::ImportedArtworkPrepareMode::AggressiveCleanup
+                      ? "Prepare + Weld Cleanup"
+                      : "Prepare For Cutting");
+    }
+    ImGui::Text("Part ID: %d", operation.part_id);
+    ImGui::Text("Cut Ready: %s", operation.cut_ready ? "Yes" : "No");
+    ImGui::Text("Nest Ready: %s", operation.nest_ready ? "Yes" : "No");
+    ImGui::Text("Islands: %d", operation.island_count);
+    ImGui::Text("Outer: %d", operation.outer_count);
+    ImGui::Text("Holes: %d", operation.hole_count);
+    ImGui::Text("Attached Holes: %d", operation.attached_hole_count);
+    ImGui::Text("Orphan Holes: %d", operation.orphan_hole_count);
+    ImGui::Text("Preserved: %d", operation.preserved_count);
+    ImGui::Text("Stitched: %d", operation.stitched_count);
+    ImGui::Text("Cleaned: %d", operation.cleaned_count);
+    ImGui::Text("Ambiguous Cleanup: %d", operation.ambiguous_count);
+    ImGui::Text("Closed: %d", operation.closed_count);
+    ImGui::Text("Open: %d", operation.open_count);
+    ImGui::Text("Placeholder: %d", operation.placeholder_count);
+  }
+}
 
+void DrawImportedArtworkTransformContents(im2d::CanvasState &state,
+                                          im2d::ImportedArtwork &artwork) {
+  ImGui::TextUnformatted("Transforms");
   if (ImGui::Button("Flip Horizontal")) {
-    im2d::operations::FlipImportedArtworkHorizontal(state, artwork->id);
+    im2d::operations::FlipImportedArtworkHorizontal(state, artwork.id);
   }
   ImGui::SameLine();
   if (ImGui::Button("Flip Vertical")) {
-    im2d::operations::FlipImportedArtworkVertical(state, artwork->id);
+    im2d::operations::FlipImportedArtworkVertical(state, artwork.id);
   }
   if (ImGui::Button("Rotate 90 CW")) {
-    im2d::operations::RotateImportedArtworkClockwise(state, artwork->id);
+    im2d::operations::RotateImportedArtworkClockwise(state, artwork.id);
   }
   ImGui::SameLine();
   if (ImGui::Button("Rotate 90 CCW")) {
-    im2d::operations::RotateImportedArtworkCounterClockwise(state, artwork->id);
+    im2d::operations::RotateImportedArtworkCounterClockwise(state, artwork.id);
   }
-  if (ImGui::Button("Delete")) {
-    im2d::operations::DeleteImportedArtwork(state, artwork->id);
+}
+
+} // namespace
+
+void DrawImportedArtworkListContents(im2d::CanvasState &state) {
+  ImGui::Text("Imported Objects: %d",
+              static_cast<int>(state.imported_artwork.size()));
+  ImGui::Separator();
+
+  if (state.imported_artwork.empty()) {
+    ImGui::TextUnformatted("No imported objects on the canvas.");
+    return;
   }
+
+  int pending_delete_artwork_id = 0;
+  for (im2d::ImportedArtwork &artwork : state.imported_artwork) {
+    ImGui::PushID(artwork.id);
+    ImGui::Checkbox("##visible", &artwork.visible);
+    ImGui::SameLine();
+    const std::string label = artwork.name + " [" + artwork.source_format + "]";
+    const bool selected = state.selected_imported_artwork_id == artwork.id;
+    if (ImGui::Selectable(label.c_str(), selected)) {
+      SelectImportedArtwork(state, artwork.id);
+    }
+    if (ImGui::BeginPopupContextItem("canvas_object_row_menu")) {
+      if (ImGui::MenuItem("Select", nullptr, selected)) {
+        SelectImportedArtwork(state, artwork.id);
+      }
+      if (ImGui::MenuItem("Delete")) {
+        pending_delete_artwork_id = artwork.id;
+      }
+      ImGui::EndPopup();
+    }
+    ImGui::PopID();
+  }
+
+  if (pending_delete_artwork_id != 0) {
+    im2d::operations::DeleteImportedArtwork(state, pending_delete_artwork_id);
+  }
+}
+
+void DrawImportedArtworkListWindow(im2d::CanvasState &state,
+                                   const char *window_title) {
+  ImGui::Begin(window_title);
+  DrawImportedArtworkListContents(state);
+  ImGui::End();
+}
+
+void DrawImportedArtworkSvgExportContents(im2d::CanvasState &state) {
+  im2d::ImportedArtwork *artwork = ResolveSelectedImportedArtworkForUi(state);
+  if (artwork == nullptr) {
+    ImGui::TextUnformatted(
+        "Select an imported object to preview or save SVG exports.");
+    return;
+  }
+  DrawImportedArtworkSvgExportContentsInternal(state, *artwork);
+}
+
+void DrawImportedArtworkCanvasOperationsContents(im2d::CanvasState &state) {
+  im2d::ImportedArtwork *artwork = ResolveSelectedImportedArtworkForUi(state);
+  if (artwork == nullptr) {
+    ImGui::TextUnformatted(
+        "Select an imported object to access canvas operations.");
+    return;
+  }
+
+  DrawImportedArtworkCanvasOverviewContents(state, *artwork);
+  ImGui::Separator();
+  DrawImportedArtworkTransformContents(state, *artwork);
+}
+
+void DrawImportedArtworkCutOperationsContents(im2d::CanvasState &state) {
+  im2d::ImportedArtwork *artwork = ResolveSelectedImportedArtworkForUi(state);
+  if (artwork == nullptr) {
+    ImGui::TextUnformatted("Select an imported object to access extraction, "
+                           "cut, and separation operations.");
+    return;
+  }
+
+  DrawImportedArtworkWorkflowContents(state);
+  ImGui::Separator();
+  DrawImportedArtworkOperationStatusContents(state, *artwork);
+}
+
+void DrawImportedArtworkObjectInspectorSectionContents(
+    im2d::CanvasState &state) {
+  im2d::ImportedArtwork *artwork = ResolveSelectedImportedArtworkForUi(state);
+  if (artwork == nullptr) {
+    ImGui::TextUnformatted("Select an imported object to inspect it.");
+    return;
+  }
+
+  DrawImportedArtworkObjectInspectorContentsInternal(state, *artwork);
+}
+
+void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
+  im2d::ImportedArtwork *artwork = ResolveSelectedImportedArtworkForUi(state);
+  if (artwork == nullptr) {
+    ImGui::TextUnformatted("Select an imported object to inspect it.");
+    return;
+  }
+
+  DrawImportedArtworkCanvasOverviewContents(state, *artwork);
+  ImGui::Separator();
+  DrawImportedArtworkObjectInspectorContentsInternal(state, *artwork);
+  ImGui::Separator();
+  DrawImportedArtworkSvgExportContentsInternal(state, *artwork);
+  ImGui::Separator();
+  DrawImportedArtworkOperationStatusContents(state, *artwork);
 }
 
 void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
