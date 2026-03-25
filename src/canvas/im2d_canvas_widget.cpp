@@ -1765,22 +1765,28 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         }
       }
     } else if (area_hit.id != 0) {
-      ResetMarqueeInteractionState(&transient_state);
-      transient_state.selected_working_area_id = area_hit.id;
-      state.selected_imported_artwork_id = 0;
-      ClearImportedDebugSelection(state);
-      ClearSelectedImportedElements(state);
-      if (WorkingArea *area = FindWorkingArea(state, area_hit.id);
-          area != nullptr) {
-        const ImVec2 world = ScreenToWorld(state, canvas_rect.Min, io.MousePos);
-        if (area_hit.zone == WorkingAreaHitZone::ResizeHandle &&
-            HasWorkingAreaFlag(area->flags, WorkingAreaFlagResizable)) {
-          transient_state.resizing_working_area_id = area_hit.id;
-        } else if (area_hit.zone == WorkingAreaHitZone::Body &&
-                   HasWorkingAreaFlag(area->flags, WorkingAreaFlagMovable)) {
-          transient_state.dragging_working_area_id = area_hit.id;
-          transient_state.working_area_drag_offset =
-              ImVec2(world.x - area->origin.x, world.y - area->origin.y);
+      if (marquee_mode_active && state.selected_imported_artwork_id != 0) {
+        ArmMarqueeSelection(state, &transient_state, canvas_rect.Min,
+                            io.MousePos);
+      } else {
+        ResetMarqueeInteractionState(&transient_state);
+        transient_state.selected_working_area_id = area_hit.id;
+        state.selected_imported_artwork_id = 0;
+        ClearImportedDebugSelection(state);
+        ClearSelectedImportedElements(state);
+        if (WorkingArea *area = FindWorkingArea(state, area_hit.id);
+            area != nullptr) {
+          const ImVec2 world =
+              ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+          if (area_hit.zone == WorkingAreaHitZone::ResizeHandle &&
+              HasWorkingAreaFlag(area->flags, WorkingAreaFlagResizable)) {
+            transient_state.resizing_working_area_id = area_hit.id;
+          } else if (area_hit.zone == WorkingAreaHitZone::Body &&
+                     HasWorkingAreaFlag(area->flags, WorkingAreaFlagMovable)) {
+            transient_state.dragging_working_area_id = area_hit.id;
+            transient_state.working_area_drag_offset =
+                ImVec2(world.x - area->origin.x, world.y - area->origin.y);
+          }
         }
       }
     } else {

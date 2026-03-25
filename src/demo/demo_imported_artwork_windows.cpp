@@ -54,6 +54,10 @@ struct AutoCutPreviewUiState {
   float minimum_gap = 5.0f;
 };
 
+struct CutOperationUiState {
+  bool auto_group_cut_outputs = false;
+};
+
 SvgExportUiState &GetSvgExportUiState() {
   static SvgExportUiState state;
   return state;
@@ -69,6 +73,11 @@ AutoCutPreviewUiState &GetAutoCutPreviewUiState() {
   return state;
 }
 
+CutOperationUiState &GetCutOperationUiState() {
+  static CutOperationUiState state;
+  return state;
+}
+
 bool HasActiveSeparationPreview(const im2d::CanvasState &state,
                                 int artwork_id) {
   return state.imported_artwork_separation_preview.active &&
@@ -78,6 +87,11 @@ bool HasActiveSeparationPreview(const im2d::CanvasState &state,
 bool HasActiveAutoCutPreview(const im2d::CanvasState &state, int artwork_id) {
   return state.imported_artwork_auto_cut_preview.active &&
          state.imported_artwork_auto_cut_preview.artwork_id == artwork_id;
+}
+
+void ClearCutOperationPreviews(im2d::CanvasState &state) {
+  im2d::ClearImportedArtworkSeparationPreview(state);
+  im2d::ClearImportedArtworkAutoCutPreview(state);
 }
 
 const char *AutoCutAxisModeLabel(im2d::AutoCutPreviewAxisMode axis_mode) {
@@ -533,6 +547,79 @@ void SelectImportedDxfText(im2d::CanvasState &state, int artwork_id,
       {im2d::ImportedElementKind::DxfText, text_id}};
 }
 
+bool IsImportedElementSelectedInVector(
+    const std::vector<im2d::ImportedElementSelection> &selections,
+    im2d::ImportedElementKind kind, int item_id) {
+  return std::any_of(
+      selections.begin(), selections.end(),
+      [kind, item_id](const im2d::ImportedElementSelection &selection) {
+        return selection.kind == kind && selection.item_id == item_id;
+      });
+}
+
+bool IsImportedMultiSelectModifierDown() {
+  const ImGuiIO &io = ImGui::GetIO();
+  return io.KeyCtrl || io.KeyShift;
+}
+
+void ToggleImportedElementSelection(
+    im2d::CanvasState &state, int artwork_id, im2d::ImportedElementKind kind,
+    int item_id, im2d::ImportedDebugSelectionKind debug_selection_kind) {
+  if (state.selected_imported_artwork_id != artwork_id) {
+    im2d::ClearSelectedImportedElements(state);
+  }
+
+  state.selected_imported_artwork_id = artwork_id;
+  state.selected_imported_debug = {debug_selection_kind, artwork_id, item_id};
+
+  auto it = std::find_if(
+      state.selected_imported_elements.begin(),
+      state.selected_imported_elements.end(),
+      [kind, item_id](const im2d::ImportedElementSelection &selection) {
+        return selection.kind == kind && selection.item_id == item_id;
+      });
+  if (it != state.selected_imported_elements.end()) {
+    state.selected_imported_elements.erase(it);
+    return;
+  }
+
+  state.selected_imported_elements.push_back({kind, item_id});
+}
+
+void HandleImportedPathTreeSelection(im2d::CanvasState &state, int artwork_id,
+                                     int path_id) {
+  if (!IsImportedMultiSelectModifierDown()) {
+    SelectImportedPath(state, artwork_id, path_id);
+    return;
+  }
+  ToggleImportedElementSelection(state, artwork_id,
+                                 im2d::ImportedElementKind::Path, path_id,
+                                 im2d::ImportedDebugSelectionKind::Path);
+}
+
+void HandleImportedDxfTextTreeSelection(im2d::CanvasState &state,
+                                        int artwork_id, int text_id) {
+  if (!IsImportedMultiSelectModifierDown()) {
+    SelectImportedDxfText(state, artwork_id, text_id);
+    return;
+  }
+  ToggleImportedElementSelection(state, artwork_id,
+                                 im2d::ImportedElementKind::DxfText, text_id,
+                                 im2d::ImportedDebugSelectionKind::DxfText);
+}
+
+int CountGroupableImportedRootItems(const im2d::ImportedArtwork &artwork) {
+  const im2d::ImportedGroup *root_group =
+      im2d::FindImportedGroup(artwork, artwork.root_group_id);
+  if (root_group == nullptr) {
+    return static_cast<int>(artwork.paths.size() + artwork.dxf_text.size());
+  }
+
+  return static_cast<int>(root_group->child_group_ids.size() +
+                          root_group->path_ids.size() +
+                          root_group->dxf_text_ids.size());
+}
+
 void SelectLastOperationIssueElements(im2d::CanvasState &state,
                                       int artwork_id) {
   if (state.last_imported_operation_issue_artwork_id != artwork_id) {
@@ -566,6 +653,246 @@ bool IsSkippedImportedElement(const im2d::CanvasState &state, int artwork_id,
       [kind, item_id](const im2d::ImportedElementSelection &selection) {
         return selection.kind == kind && selection.item_id == item_id;
       });
+}
+
+bool HasExtractableImportedDebugSelection(
+    const im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
+  if (state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  switch (state.selected_imported_debug.kind) {
+  case im2d::ImportedDebugSelectionKind::Group:
+    return im2d::FindImportedGroup(
+               artwork, state.selected_imported_debug.item_id) != nullptr;
+  case im2d::ImportedDebugSelectionKind::Path:
+    return im2d::FindImportedPath(
+               artwork, state.selected_imported_debug.item_id) != nullptr;
+  case im2d::ImportedDebugSelectionKind::DxfText:
+    return im2d::FindImportedDxfText(
+               artwork, state.selected_imported_debug.item_id) != nullptr;
+  case im2d::ImportedDebugSelectionKind::Artwork:
+  case im2d::ImportedDebugSelectionKind::None:
+    return false;
+  }
+  return false;
+}
+
+const char *ExtractActionLabel(const im2d::CanvasState &state,
+                               const im2d::ImportedArtwork &artwork) {
+  if (!state.selected_imported_elements.empty() &&
+      state.selected_imported_artwork_id == artwork.id) {
+    return "Extract Selection";
+  }
+
+  switch (state.selected_imported_debug.kind) {
+  case im2d::ImportedDebugSelectionKind::Group:
+    return "Extract Selected Group";
+  case im2d::ImportedDebugSelectionKind::Path:
+    return "Extract Selected Path";
+  case im2d::ImportedDebugSelectionKind::DxfText:
+    return "Extract Selected DXF Text";
+  case im2d::ImportedDebugSelectionKind::Artwork:
+  case im2d::ImportedDebugSelectionKind::None:
+    return "Extract Selection";
+  }
+  return "Extract Selection";
+}
+
+bool HasGroupableImportedElementSelection(
+    const im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
+  return state.selected_imported_artwork_id == artwork.id &&
+         state.selected_imported_elements.size() >= 2;
+}
+
+bool HasGroupableImportedRootSelection(const im2d::CanvasState &state,
+                                       const im2d::ImportedArtwork &artwork) {
+  if (state.selected_imported_artwork_id != artwork.id ||
+      !state.selected_imported_elements.empty()) {
+    return false;
+  }
+
+  if (state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  const bool artwork_selected = state.selected_imported_debug.kind ==
+                                im2d::ImportedDebugSelectionKind::Artwork;
+  const bool root_group_selected =
+      state.selected_imported_debug.kind ==
+          im2d::ImportedDebugSelectionKind::Group &&
+      state.selected_imported_debug.item_id == artwork.root_group_id;
+  return (artwork_selected || root_group_selected) &&
+         CountGroupableImportedRootItems(artwork) >= 2;
+}
+
+const char *GroupActionLabel(const im2d::CanvasState &state,
+                             const im2d::ImportedArtwork &artwork) {
+  if (HasGroupableImportedElementSelection(state, artwork)) {
+    return "Group Selection";
+  }
+  if (HasGroupableImportedRootSelection(state, artwork)) {
+    return "Group Artwork Contents";
+  }
+  return "Group Selection";
+}
+
+bool HasUngroupableImportedDebugSelection(
+    const im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
+  return state.selected_imported_debug.artwork_id == artwork.id &&
+         state.selected_imported_debug.kind ==
+             im2d::ImportedDebugSelectionKind::Group &&
+         state.selected_imported_debug.item_id != artwork.root_group_id &&
+         im2d::FindImportedGroup(
+             artwork, state.selected_imported_debug.item_id) != nullptr;
+}
+
+enum class ImportedDebugTreeActionKind {
+  None,
+  Extract,
+  GroupSelection,
+  GroupArtworkContents,
+  Ungroup,
+};
+
+struct ImportedDebugTreeAction {
+  ImportedDebugTreeActionKind kind = ImportedDebugTreeActionKind::None;
+  im2d::ImportedDebugSelectionKind selection_kind =
+      im2d::ImportedDebugSelectionKind::None;
+  int artwork_id = 0;
+  int item_id = 0;
+};
+
+void QueueImportedDebugTreeAction(
+    ImportedDebugTreeAction *action, ImportedDebugTreeActionKind kind,
+    im2d::ImportedDebugSelectionKind selection_kind, int artwork_id,
+    int item_id) {
+  if (action == nullptr) {
+    return;
+  }
+  action->kind = kind;
+  action->selection_kind = selection_kind;
+  action->artwork_id = artwork_id;
+  action->item_id = item_id;
+}
+
+bool ApplyImportedDebugTreeAction(im2d::CanvasState &state,
+                                  const im2d::ImportedArtwork &artwork,
+                                  const ImportedDebugTreeAction &action) {
+  if (action.kind == ImportedDebugTreeActionKind::None ||
+      action.artwork_id != artwork.id) {
+    return false;
+  }
+
+  switch (action.selection_kind) {
+  case im2d::ImportedDebugSelectionKind::Artwork:
+    if (action.kind != ImportedDebugTreeActionKind::GroupSelection) {
+      SelectImportedArtwork(state, action.artwork_id);
+    }
+    break;
+  case im2d::ImportedDebugSelectionKind::Group:
+    SelectImportedGroup(state, action.artwork_id, action.item_id);
+    break;
+  case im2d::ImportedDebugSelectionKind::Path:
+    SelectImportedPath(state, action.artwork_id, action.item_id);
+    break;
+  case im2d::ImportedDebugSelectionKind::DxfText:
+    SelectImportedDxfText(state, action.artwork_id, action.item_id);
+    break;
+  case im2d::ImportedDebugSelectionKind::None:
+    break;
+  }
+
+  switch (action.kind) {
+  case ImportedDebugTreeActionKind::Extract:
+    im2d::operations::ExtractSelectedImportedElements(state, artwork.id);
+    return true;
+  case ImportedDebugTreeActionKind::GroupSelection:
+    im2d::operations::GroupSelectedImportedElements(state, artwork.id);
+    return true;
+  case ImportedDebugTreeActionKind::GroupArtworkContents:
+    im2d::operations::GroupImportedArtworkRootContents(state, artwork.id);
+    return true;
+  case ImportedDebugTreeActionKind::Ungroup:
+    im2d::operations::UngroupSelectedImportedGroup(state, artwork.id);
+    return true;
+  case ImportedDebugTreeActionKind::None:
+    return false;
+  }
+  return false;
+}
+
+bool DrawImportedGroupingControls(im2d::CanvasState &state,
+                                  im2d::ImportedArtwork &artwork) {
+  const bool can_group_selection =
+      HasGroupableImportedElementSelection(state, artwork);
+  const bool can_group_root = HasGroupableImportedRootSelection(state, artwork);
+  const bool can_group = can_group_selection || can_group_root;
+  const bool can_ungroup = HasUngroupableImportedDebugSelection(state, artwork);
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Grouping");
+  if (!can_group) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button(GroupActionLabel(state, artwork))) {
+    if (can_group_selection) {
+      im2d::operations::GroupSelectedImportedElements(state, artwork.id);
+    } else {
+      im2d::operations::GroupImportedArtworkRootContents(state, artwork.id);
+    }
+    return true;
+  }
+  if (!can_group) {
+    ImGui::EndDisabled();
+  }
+  ImGui::SameLine();
+  if (!can_ungroup) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Ungroup Selected Group")) {
+    im2d::operations::UngroupSelectedImportedGroup(state, artwork.id);
+    return true;
+  }
+  if (!can_ungroup) {
+    ImGui::EndDisabled();
+  }
+  if (!can_group && !can_ungroup) {
+    ImGui::TextUnformatted(
+        "Select two or more imported elements to group them, select the "
+        "artwork root to group its contents, or select a non-root group to "
+        "ungroup it.");
+  }
+  return false;
+}
+
+bool DrawDebugTreeExtractionControls(im2d::CanvasState &state,
+                                     im2d::ImportedArtwork &artwork) {
+  const bool has_selected_elements =
+      !state.selected_imported_elements.empty() &&
+      state.selected_imported_artwork_id == artwork.id;
+  const bool has_debug_target =
+      HasExtractableImportedDebugSelection(state, artwork);
+  const bool can_extract = has_selected_elements || has_debug_target;
+
+  ImGui::Separator();
+  ImGui::TextUnformatted("Extraction");
+  if (!can_extract) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button(ExtractActionLabel(state, artwork))) {
+    im2d::operations::ExtractSelectedImportedElements(state, artwork.id);
+    if (!can_extract) {
+      ImGui::EndDisabled();
+    }
+    return true;
+  }
+  if (!can_extract) {
+    ImGui::EndDisabled();
+    ImGui::TextUnformatted("Select a group, path, or DXF text in the debug "
+                           "tree, or use a marquee selection.");
+  }
+  return false;
 }
 
 std::string ImportedPathSummary(const im2d::ImportedPath &path) {
@@ -806,14 +1133,19 @@ void DrawSelectedImportedItemDetails(const im2d::ImportedArtwork &artwork,
 
 void DrawImportedPathNode(im2d::CanvasState &state,
                           const im2d::ImportedArtwork &artwork,
-                          const im2d::ImportedPath &path) {
+                          const im2d::ImportedPath &path,
+                          ImportedDebugTreeAction *pending_action) {
   const bool skipped = IsSkippedImportedElement(
       state, artwork.id, im2d::ImportedElementKind::Path, path.id);
   const ImGuiTreeNodeFlags flags =
       ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
       ImGuiTreeNodeFlags_SpanAvailWidth |
-      (IsSelectedImportedDebugItem(
-           state, artwork.id, im2d::ImportedDebugSelectionKind::Path, path.id)
+      ((IsSelectedImportedDebugItem(state, artwork.id,
+                                    im2d::ImportedDebugSelectionKind::Path,
+                                    path.id) ||
+        IsImportedElementSelectedInVector(state.selected_imported_elements,
+                                          im2d::ImportedElementKind::Path,
+                                          path.id))
            ? ImGuiTreeNodeFlags_Selected
            : 0);
   const std::string label =
@@ -821,21 +1153,36 @@ void DrawImportedPathNode(im2d::CanvasState &state,
   ImGui::TreeNodeEx(reinterpret_cast<void *>(static_cast<intptr_t>(path.id)),
                     flags, "%s", label.c_str());
   if (ImGui::IsItemClicked()) {
-    SelectImportedPath(state, artwork.id, path.id);
+    HandleImportedPathTreeSelection(state, artwork.id, path.id);
+  }
+  if (ImGui::BeginPopupContextItem()) {
+    if (ImGui::MenuItem("Select Path")) {
+      SelectImportedPath(state, artwork.id, path.id);
+    }
+    if (ImGui::MenuItem("Extract Path")) {
+      QueueImportedDebugTreeAction(
+          pending_action, ImportedDebugTreeActionKind::Extract,
+          im2d::ImportedDebugSelectionKind::Path, artwork.id, path.id);
+    }
+    ImGui::EndPopup();
   }
 }
 
 void DrawImportedDxfTextNode(im2d::CanvasState &state,
                              const im2d::ImportedArtwork &artwork,
-                             const im2d::ImportedDxfText &text) {
+                             const im2d::ImportedDxfText &text,
+                             ImportedDebugTreeAction *pending_action) {
   const bool skipped = IsSkippedImportedElement(
       state, artwork.id, im2d::ImportedElementKind::DxfText, text.id);
   const ImGuiTreeNodeFlags flags =
       ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
       ImGuiTreeNodeFlags_SpanAvailWidth |
-      (IsSelectedImportedDebugItem(state, artwork.id,
-                                   im2d::ImportedDebugSelectionKind::DxfText,
-                                   text.id)
+      ((IsSelectedImportedDebugItem(state, artwork.id,
+                                    im2d::ImportedDebugSelectionKind::DxfText,
+                                    text.id) ||
+        IsImportedElementSelectedInVector(state.selected_imported_elements,
+                                          im2d::ImportedElementKind::DxfText,
+                                          text.id))
            ? ImGuiTreeNodeFlags_Selected
            : 0);
   const std::string label =
@@ -844,13 +1191,25 @@ void DrawImportedDxfTextNode(im2d::CanvasState &state,
       reinterpret_cast<void *>(static_cast<intptr_t>(1000000 + text.id)), flags,
       "%s", label.c_str());
   if (ImGui::IsItemClicked()) {
-    SelectImportedDxfText(state, artwork.id, text.id);
+    HandleImportedDxfTextTreeSelection(state, artwork.id, text.id);
+  }
+  if (ImGui::BeginPopupContextItem()) {
+    if (ImGui::MenuItem("Select DXF Text")) {
+      SelectImportedDxfText(state, artwork.id, text.id);
+    }
+    if (ImGui::MenuItem("Extract DXF Text")) {
+      QueueImportedDebugTreeAction(
+          pending_action, ImportedDebugTreeActionKind::Extract,
+          im2d::ImportedDebugSelectionKind::DxfText, artwork.id, text.id);
+    }
+    ImGui::EndPopup();
   }
 }
 
 void DrawImportedGroupNode(im2d::CanvasState &state,
                            const im2d::ImportedArtwork &artwork,
-                           const im2d::ImportedGroup &group) {
+                           const im2d::ImportedGroup &group,
+                           ImportedDebugTreeAction *pending_action) {
   std::string label = group.label.empty() ? "Group" : group.label;
   label += " (" + std::to_string(group.path_ids.size()) + " paths, " +
            std::to_string(group.child_group_ids.size()) + " groups)";
@@ -866,6 +1225,22 @@ void DrawImportedGroupNode(im2d::CanvasState &state,
   if (ImGui::IsItemClicked()) {
     SelectImportedGroup(state, artwork.id, group.id);
   }
+  if (ImGui::BeginPopupContextItem()) {
+    if (ImGui::MenuItem("Select Group")) {
+      SelectImportedGroup(state, artwork.id, group.id);
+    }
+    if (ImGui::MenuItem("Extract Group")) {
+      QueueImportedDebugTreeAction(
+          pending_action, ImportedDebugTreeActionKind::Extract,
+          im2d::ImportedDebugSelectionKind::Group, artwork.id, group.id);
+    }
+    if (group.id != artwork.root_group_id && ImGui::MenuItem("Ungroup Group")) {
+      QueueImportedDebugTreeAction(
+          pending_action, ImportedDebugTreeActionKind::Ungroup,
+          im2d::ImportedDebugSelectionKind::Group, artwork.id, group.id);
+    }
+    ImGui::EndPopup();
+  }
   if (!open) {
     return;
   }
@@ -874,14 +1249,14 @@ void DrawImportedGroupNode(im2d::CanvasState &state,
     const im2d::ImportedGroup *child_group =
         im2d::FindImportedGroup(artwork, child_group_id);
     if (child_group != nullptr) {
-      DrawImportedGroupNode(state, artwork, *child_group);
+      DrawImportedGroupNode(state, artwork, *child_group, pending_action);
     }
   }
 
   for (const int path_id : group.path_ids) {
     const im2d::ImportedPath *path = im2d::FindImportedPath(artwork, path_id);
     if (path != nullptr) {
-      DrawImportedPathNode(state, artwork, *path);
+      DrawImportedPathNode(state, artwork, *path, pending_action);
     }
   }
 
@@ -889,17 +1264,18 @@ void DrawImportedGroupNode(im2d::CanvasState &state,
     const im2d::ImportedDxfText *text =
         im2d::FindImportedDxfText(artwork, text_id);
     if (text != nullptr) {
-      DrawImportedDxfTextNode(state, artwork, *text);
+      DrawImportedDxfTextNode(state, artwork, *text, pending_action);
     }
   }
 
   ImGui::TreePop();
 }
 
-void DrawImportedDebugTree(im2d::CanvasState &state,
+bool DrawImportedDebugTree(im2d::CanvasState &state,
                            const im2d::ImportedArtwork &artwork) {
   ImGui::Separator();
   ImGui::TextUnformatted("Debug Tree");
+  ImportedDebugTreeAction pending_action;
 
   const ImGuiTreeNodeFlags root_flags =
       ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow |
@@ -914,8 +1290,26 @@ void DrawImportedDebugTree(im2d::CanvasState &state,
   if (ImGui::IsItemClicked()) {
     SelectImportedArtwork(state, artwork.id);
   }
+  if (ImGui::BeginPopupContextItem()) {
+    if (ImGui::MenuItem("Select Artwork")) {
+      SelectImportedArtwork(state, artwork.id);
+    }
+    if (HasGroupableImportedElementSelection(state, artwork) &&
+        ImGui::MenuItem("Group Selection")) {
+      QueueImportedDebugTreeAction(
+          &pending_action, ImportedDebugTreeActionKind::GroupSelection,
+          im2d::ImportedDebugSelectionKind::None, artwork.id, 0);
+    }
+    if (CountGroupableImportedRootItems(artwork) >= 2 &&
+        ImGui::MenuItem("Group Artwork Contents")) {
+      QueueImportedDebugTreeAction(
+          &pending_action, ImportedDebugTreeActionKind::GroupArtworkContents,
+          im2d::ImportedDebugSelectionKind::Artwork, artwork.id, 0);
+    }
+    ImGui::EndPopup();
+  }
   if (!root_open) {
-    return;
+    return ApplyImportedDebugTreeAction(state, artwork, pending_action);
   }
 
   const im2d::ImportedGroup *root_group =
@@ -925,32 +1319,33 @@ void DrawImportedDebugTree(im2d::CanvasState &state,
       const im2d::ImportedGroup *child_group =
           im2d::FindImportedGroup(artwork, child_group_id);
       if (child_group != nullptr) {
-        DrawImportedGroupNode(state, artwork, *child_group);
+        DrawImportedGroupNode(state, artwork, *child_group, &pending_action);
       }
     }
     for (const int path_id : root_group->path_ids) {
       const im2d::ImportedPath *path = im2d::FindImportedPath(artwork, path_id);
       if (path != nullptr) {
-        DrawImportedPathNode(state, artwork, *path);
+        DrawImportedPathNode(state, artwork, *path, &pending_action);
       }
     }
     for (const int text_id : root_group->dxf_text_ids) {
       const im2d::ImportedDxfText *text =
           im2d::FindImportedDxfText(artwork, text_id);
       if (text != nullptr) {
-        DrawImportedDxfTextNode(state, artwork, *text);
+        DrawImportedDxfTextNode(state, artwork, *text, &pending_action);
       }
     }
   } else {
     for (const im2d::ImportedPath &path : artwork.paths) {
-      DrawImportedPathNode(state, artwork, path);
+      DrawImportedPathNode(state, artwork, path, &pending_action);
     }
     for (const im2d::ImportedDxfText &text : artwork.dxf_text) {
-      DrawImportedDxfTextNode(state, artwork, text);
+      DrawImportedDxfTextNode(state, artwork, text, &pending_action);
     }
   }
 
   ImGui::TreePop();
+  return ApplyImportedDebugTreeAction(state, artwork, pending_action);
 }
 
 void DrawFilteredImportedItems(im2d::CanvasState &state,
@@ -967,7 +1362,7 @@ void DrawFilteredImportedItems(im2d::CanvasState &state,
     if (!MatchesFilter(flagged, skipped, mode)) {
       continue;
     }
-    DrawImportedPathNode(state, artwork, path);
+    DrawImportedPathNode(state, artwork, path, nullptr);
     drew_any = true;
   }
 
@@ -978,7 +1373,7 @@ void DrawFilteredImportedItems(im2d::CanvasState &state,
     if (!MatchesFilter(flagged, skipped, mode)) {
       continue;
     }
-    DrawImportedDxfTextNode(state, artwork, text);
+    DrawImportedDxfTextNode(state, artwork, text, nullptr);
     drew_any = true;
   }
 
@@ -1124,7 +1519,7 @@ void DrawImportedArtworkCanvasOverviewContents(im2d::CanvasState &state,
   }
 }
 
-void DrawImportedArtworkObjectInspectorContentsInternal(
+bool DrawImportedArtworkObjectInspectorContentsInternal(
     im2d::CanvasState &state, im2d::ImportedArtwork &artwork) {
   ImportedInspectorFilterMode &filter_mode = GetImportedInspectorFilterMode();
   ImGui::Text("Artwork: %s", artwork.name.c_str());
@@ -1151,12 +1546,21 @@ void DrawImportedArtworkObjectInspectorContentsInternal(
   }
 
   DrawSelectedImportedItemDetails(artwork, state);
+  if (DrawDebugTreeExtractionControls(state, artwork)) {
+    return true;
+  }
+  if (DrawImportedGroupingControls(state, artwork)) {
+    return true;
+  }
 
   if (filter_mode == ImportedInspectorFilterMode::Hierarchy) {
-    DrawImportedDebugTree(state, artwork);
+    if (DrawImportedDebugTree(state, artwork)) {
+      return true;
+    }
   } else {
     DrawFilteredImportedItems(state, artwork, filter_mode);
   }
+  return false;
 }
 
 void DrawImportedArtworkSvgExportContentsInternal(
@@ -1190,7 +1594,14 @@ void DrawImportedArtworkSvgExportContentsInternal(
   ImGui::TextWrapped("Export-Area Save Path: %s",
                      export_area_path.lexically_normal().string().c_str());
 
-  if (!has_selected_elements) {
+  const bool has_debug_export_target =
+      state.selected_imported_debug.artwork_id == artwork.id &&
+      state.selected_imported_debug.kind !=
+          im2d::ImportedDebugSelectionKind::None;
+  const bool has_export_selection =
+      has_selected_elements || has_debug_export_target;
+
+  if (!has_export_selection) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Preview Selection SVG")) {
@@ -1200,11 +1611,11 @@ void DrawImportedArtworkSvgExportContentsInternal(
     request.allow_placeholder_text = export_ui.allow_placeholder_text;
     GetSvgExportPreview() = im2d::exporter::ExportSvg(state, request);
   }
-  if (!has_selected_elements) {
+  if (!has_export_selection) {
     ImGui::EndDisabled();
   }
   ImGui::SameLine();
-  if (!has_selected_elements) {
+  if (!has_export_selection) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Save Selection SVG")) {
@@ -1215,7 +1626,7 @@ void DrawImportedArtworkSvgExportContentsInternal(
     GetSvgExportPreview() =
         im2d::exporter::ExportSvgToFile(state, request, selection_export_path);
   }
-  if (!has_selected_elements) {
+  if (!has_export_selection) {
     ImGui::EndDisabled();
   }
 
@@ -1347,6 +1758,16 @@ void DrawImportedArtworkTransformContents(im2d::CanvasState &state,
 void DrawImportedArtworkListContents(im2d::CanvasState &state) {
   ImGui::Text("Imported Objects: %d",
               static_cast<int>(state.imported_artwork.size()));
+  ImGui::SameLine();
+  if (state.imported_artwork.empty()) {
+    ImGui::BeginDisabled();
+  }
+  if (ImGui::Button("Delete All")) {
+    im2d::ClearImportedArtwork(state);
+  }
+  if (state.imported_artwork.empty()) {
+    ImGui::EndDisabled();
+  }
   ImGui::Separator();
 
   if (state.imported_artwork.empty()) {
@@ -1419,7 +1840,9 @@ void DrawImportedArtworkCutOperationsContents(im2d::CanvasState &state) {
     return;
   }
 
-  DrawImportedArtworkWorkflowContents(state);
+  if (DrawImportedArtworkWorkflowContents(state)) {
+    return;
+  }
   ImGui::Separator();
   DrawImportedArtworkOperationStatusContents(state, *artwork);
 }
@@ -1444,7 +1867,9 @@ void DrawImportedArtworkInspectorContents(im2d::CanvasState &state) {
 
   DrawImportedArtworkCanvasOverviewContents(state, *artwork);
   ImGui::Separator();
-  DrawImportedArtworkObjectInspectorContentsInternal(state, *artwork);
+  if (DrawImportedArtworkObjectInspectorContentsInternal(state, *artwork)) {
+    return;
+  }
   ImGui::Separator();
   DrawImportedArtworkSvgExportContentsInternal(state, *artwork);
   ImGui::Separator();
@@ -1459,13 +1884,13 @@ void DrawImportedArtworkInspectorWindow(im2d::CanvasState &state,
   ImGui::End();
 }
 
-void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
+bool DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
   im2d::ImportedArtwork *artwork =
       im2d::FindImportedArtwork(state, state.selected_imported_artwork_id);
   if (artwork == nullptr) {
     ImGui::TextUnformatted("Select an imported object to access marquee, "
                            "cutting, and extraction controls.");
-    return;
+    return false;
   }
 
   ImGui::Text("Workflow For: %s", artwork->name.c_str());
@@ -1495,19 +1920,31 @@ void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
 
   ImGui::Separator();
   ImGui::TextUnformatted("Extraction");
-  const bool has_selected_elements = !state.selected_imported_elements.empty();
-  if (!has_selected_elements) {
+  const bool has_selected_elements =
+      !state.selected_imported_elements.empty() &&
+      state.selected_imported_artwork_id == artwork->id;
+  const bool has_debug_target =
+      HasExtractableImportedDebugSelection(state, *artwork);
+  if (!has_selected_elements && !has_debug_target) {
     ImGui::BeginDisabled();
   }
-  if (ImGui::Button("Extract Selection")) {
+  if (ImGui::Button(ExtractActionLabel(state, *artwork))) {
     im2d::operations::ExtractSelectedImportedElements(state, artwork->id);
+    if (!has_selected_elements && !has_debug_target) {
+      ImGui::EndDisabled();
+    }
+    return true;
   }
-  if (!has_selected_elements) {
+  if (!has_selected_elements && !has_debug_target) {
     ImGui::EndDisabled();
   }
-  if (!has_selected_elements) {
-    ImGui::TextUnformatted(
-        "Use a marquee mode on the canvas to select elements first.");
+  if (!has_selected_elements && !has_debug_target) {
+    ImGui::TextUnformatted("Use a marquee mode on the canvas or select a "
+                           "group, path, or DXF text in the debug tree first.");
+  }
+
+  if (DrawImportedGroupingControls(state, *artwork)) {
+    return true;
   }
 
   ImGui::Separator();
@@ -1536,6 +1973,12 @@ void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
       "Infer temporary cut bands from the selected artwork bounds and show the "
       "same overlay style as the guide-band preview.");
   AutoCutPreviewUiState &auto_cut_preview = GetAutoCutPreviewUiState();
+  CutOperationUiState &cut_operations = GetCutOperationUiState();
+  ImGui::Checkbox("Auto Group Cut Outputs",
+                  &cut_operations.auto_group_cut_outputs);
+  ImGui::TextWrapped(
+      "When enabled, each artwork created by Apply Cut will wrap its root "
+      "contents into a new group automatically.");
   if (ImGui::BeginCombo("Axis Mode",
                         AutoCutAxisModeLabel(auto_cut_preview.axis_mode))) {
     constexpr im2d::AutoCutPreviewAxisMode kAxisModes[] = {
@@ -1557,13 +2000,10 @@ void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
   ImGui::DragFloat("Minimum Gap", &auto_cut_preview.minimum_gap, 0.25f, 0.25f,
                    1000.0f, "%.2f");
   if (ImGui::Button("Preview Auto Cut")) {
+    ClearCutOperationPreviews(state);
     im2d::PreviewImportedArtworkAutoCut(state, artwork->id,
                                         auto_cut_preview.axis_mode,
                                         auto_cut_preview.minimum_gap);
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Clear Auto Cut Preview")) {
-    im2d::ClearImportedArtworkAutoCutPreview(state);
   }
 
   const bool has_auto_cut_preview = HasActiveAutoCutPreview(state, artwork->id);
@@ -1606,6 +2046,7 @@ void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Preview Multi-Guide Split")) {
+    ClearCutOperationPreviews(state);
     im2d::PreviewSeparateImportedArtworkByGuide(state, artwork->id,
                                                 preview_anchor_guide_id);
   }
@@ -1642,15 +2083,34 @@ void DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
     if (!preview.message.empty()) {
       ImGui::TextWrapped("%s", preview.message.c_str());
     }
-    if (ImGui::Button("Apply Previewed Split")) {
-      im2d::SeparateImportedArtworkByGuide(state, artwork->id,
-                                           preview.guide_id);
+  }
+
+  if (has_auto_cut_preview || has_separation_preview) {
+    ImGui::Separator();
+    if (has_auto_cut_preview) {
+      const im2d::ImportedArtworkAutoCutPreview &preview =
+          state.imported_artwork_auto_cut_preview;
+      if (ImGui::Button("Apply Cut")) {
+        im2d::ApplyImportedArtworkAutoCut(
+            state, artwork->id, preview.axis_mode, preview.minimum_gap,
+            cut_operations.auto_group_cut_outputs);
+      }
+      ImGui::SameLine();
+    } else if (has_separation_preview) {
+      const im2d::ImportedArtworkSeparationPreview &preview =
+          state.imported_artwork_separation_preview;
+      if (ImGui::Button("Apply Cut")) {
+        im2d::SeparateImportedArtworkByGuide(
+            state, artwork->id, preview.guide_id,
+            cut_operations.auto_group_cut_outputs);
+      }
+      ImGui::SameLine();
     }
-    ImGui::SameLine();
-    if (ImGui::Button("Clear Split Preview")) {
-      im2d::ClearImportedArtworkSeparationPreview(state);
+    if (ImGui::Button("Clear Preview")) {
+      ClearCutOperationPreviews(state);
     }
   }
+  return false;
 }
 
 void DrawImportedArtworkWorkflowWindow(im2d::CanvasState &state,

@@ -295,6 +295,99 @@ ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
   return subset;
 }
 
+int ResolveGroupingParentGroupId(const ImportedArtwork &artwork,
+                                 const std::unordered_set<int> &path_ids,
+                                 const std::unordered_set<int> &text_ids) {
+  int parent_group_id = -1;
+  const auto update_parent = [&](int candidate_parent_group_id) {
+    if (parent_group_id == -1) {
+      parent_group_id = candidate_parent_group_id;
+      return;
+    }
+    if (parent_group_id != candidate_parent_group_id) {
+      parent_group_id = artwork.root_group_id;
+    }
+  };
+
+  for (const ImportedPath &path : artwork.paths) {
+    if (path_ids.contains(path.id)) {
+      update_parent(path.parent_group_id);
+    }
+  }
+  for (const ImportedDxfText &text : artwork.dxf_text) {
+    if (text_ids.contains(text.id)) {
+      update_parent(text.parent_group_id);
+    }
+  }
+
+  if (parent_group_id <= 0) {
+    return artwork.root_group_id;
+  }
+  return parent_group_id;
+}
+
+void RemoveImportedGroupReference(std::vector<int> *group_ids, int group_id) {
+  if (group_ids == nullptr) {
+    return;
+  }
+  std::erase(*group_ids, group_id);
+}
+
+int CountGroupingTargets(const std::unordered_set<int> &group_ids,
+                         const std::unordered_set<int> &path_ids,
+                         const std::unordered_set<int> &text_ids) {
+  return static_cast<int>(group_ids.size() + path_ids.size() + text_ids.size());
+}
+
+void MoveImportedGroupingTargetsToGroup(
+    ImportedArtwork *artwork, ImportedGroup *parent_group,
+    const std::unordered_set<int> &group_ids,
+    const std::unordered_set<int> &path_ids,
+    const std::unordered_set<int> &text_ids, ImportedGroup *new_group) {
+  if (artwork == nullptr || parent_group == nullptr || new_group == nullptr) {
+    return;
+  }
+
+  for (ImportedGroup &group : artwork->groups) {
+    if (!group_ids.contains(group.id)) {
+      continue;
+    }
+    if (ImportedGroup *old_parent =
+            FindImportedGroup(*artwork, group.parent_group_id);
+        old_parent != nullptr) {
+      RemoveImportedGroupReference(&old_parent->child_group_ids, group.id);
+    }
+    group.parent_group_id = new_group->id;
+    new_group->child_group_ids.push_back(group.id);
+  }
+  for (ImportedPath &path : artwork->paths) {
+    if (!path_ids.contains(path.id)) {
+      continue;
+    }
+    if (ImportedGroup *old_parent =
+            FindImportedGroup(*artwork, path.parent_group_id);
+        old_parent != nullptr) {
+      RemoveImportedGroupReference(&old_parent->path_ids, path.id);
+    }
+    path.parent_group_id = new_group->id;
+    new_group->path_ids.push_back(path.id);
+  }
+  for (ImportedDxfText &text : artwork->dxf_text) {
+    if (!text_ids.contains(text.id)) {
+      continue;
+    }
+    if (ImportedGroup *old_parent =
+            FindImportedGroup(*artwork, text.parent_group_id);
+        old_parent != nullptr) {
+      RemoveImportedGroupReference(&old_parent->dxf_text_ids, text.id);
+    }
+    text.parent_group_id = new_group->id;
+    new_group->dxf_text_ids.push_back(text.id);
+  }
+
+  parent_group->child_group_ids.push_back(new_group->id);
+}
+
 struct GuideSplitLogicalPart {
   std::unordered_set<int> path_ids;
   std::unordered_set<int> text_ids;
@@ -379,7 +472,8 @@ void AppendPartTextSamples(const ImportedArtwork &artwork,
 
 std::vector<GuideSplitLogicalPart> BuildGuideSplitLogicalParts(
     const ImportedArtwork &artwork,
-    std::vector<ImportedElementSelection> *skipped_elements) {
+    std::vector<ImportedElementSelection> *skipped_elements,
+    bool skip_orphan_items) {
   std::vector<GuideSplitLogicalPart> parts;
   std::unordered_map<int, size_t> path_outer_part_indices;
   std::unordered_map<int, size_t> text_outer_part_indices;
@@ -438,7 +532,7 @@ std::vector<GuideSplitLogicalPart> BuildGuideSplitLogicalParts(
     if (assigned_path_ids.contains(path.id)) {
       continue;
     }
-    if (orphan_path_ids.contains(path.id)) {
+    if (skip_orphan_items && orphan_path_ids.contains(path.id)) {
       skipped_elements->push_back({ImportedElementKind::Path, path.id});
       continue;
     }
@@ -452,7 +546,7 @@ std::vector<GuideSplitLogicalPart> BuildGuideSplitLogicalParts(
     if (assigned_text_ids.contains(text.id)) {
       continue;
     }
-    if (orphan_text_ids.contains(text.id)) {
+    if (skip_orphan_items && orphan_text_ids.contains(text.id)) {
       skipped_elements->push_back({ImportedElementKind::DxfText, text.id});
       continue;
     }
@@ -583,7 +677,7 @@ AutoCutPreviewPlan BuildAutoCutPreviewPlan(const ImportedArtwork &artwork,
                                            float minimum_gap) {
   AutoCutPreviewPlan plan;
   std::vector<GuideSplitLogicalPart> logical_parts =
-      BuildGuideSplitLogicalParts(artwork, &plan.skipped_elements);
+      BuildGuideSplitLogicalParts(artwork, &plan.skipped_elements, false);
   const size_t orphan_count = plan.skipped_elements.size();
   const std::vector<LogicalPartPreviewBounds> logical_part_bounds =
       BuildLogicalPartPreviewBounds(logical_parts);
@@ -723,7 +817,7 @@ GuideSplitPreviewPlan BuildGuideSplitPreviewPlan(const ImportedArtwork &artwork,
   std::sort(layout.horizontal_positions.begin(),
             layout.horizontal_positions.end());
   std::vector<GuideSplitLogicalPart> logical_parts =
-      BuildGuideSplitLogicalParts(artwork, &plan.skipped_elements);
+      BuildGuideSplitLogicalParts(artwork, &plan.skipped_elements, false);
   const size_t orphan_count = plan.skipped_elements.size();
   std::map<std::pair<int, int>, size_t> bucket_lookup;
 
@@ -2070,10 +2164,13 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
   return result;
 }
 
-ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
-    CanvasState &state, int imported_artwork_id,
-    const std::vector<GuideSplitPreviewPlan::BucketAssignment> &buckets,
-    const std::string &name_suffix, const std::string &action_verb) {
+template <typename BucketAssignment>
+ImportedArtworkOperationResult
+MoveImportedElementsToNewArtworks(CanvasState &state, int imported_artwork_id,
+                                  const std::vector<BucketAssignment> &buckets,
+                                  const std::string &name_suffix,
+                                  const std::string &action_verb,
+                                  bool create_groups_from_cuts = false) {
   ImportedArtworkOperationResult result;
   result.artwork_id = imported_artwork_id;
 
@@ -2090,7 +2187,7 @@ ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
 
   std::unordered_set<int> moved_path_ids;
   std::unordered_set<int> moved_text_ids;
-  for (const GuideSplitPreviewPlan::BucketAssignment &bucket : buckets) {
+  for (const BucketAssignment &bucket : buckets) {
     moved_path_ids.insert(bucket.path_ids.begin(), bucket.path_ids.end());
     moved_text_ids.insert(bucket.text_ids.begin(), bucket.text_ids.end());
   }
@@ -2106,7 +2203,7 @@ ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
 
   std::vector<ImportedArtwork> subsets;
   subsets.reserve(buckets.size());
-  for (const GuideSplitPreviewPlan::BucketAssignment &bucket : buckets) {
+  for (const BucketAssignment &bucket : buckets) {
     if (bucket.path_ids.empty() && bucket.text_ids.empty()) {
       continue;
     }
@@ -2136,11 +2233,48 @@ ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
   }
 
   int created_artwork_id = 0;
+  std::vector<int> created_artwork_ids;
+  created_artwork_ids.reserve(subsets.size());
   for (ImportedArtwork &subset : subsets) {
     const int appended_artwork_id =
         AppendImportedArtwork(state, std::move(subset), false);
     if (created_artwork_id == 0) {
       created_artwork_id = appended_artwork_id;
+    }
+    if (appended_artwork_id != 0) {
+      created_artwork_ids.push_back(appended_artwork_id);
+    }
+  }
+
+  int grouped_artwork_count = 0;
+  if (create_groups_from_cuts) {
+    for (const int appended_artwork_id : created_artwork_ids) {
+      ImportedArtwork *created_artwork =
+          FindImportedArtwork(state, appended_artwork_id);
+      if (created_artwork == nullptr) {
+        continue;
+      }
+
+      const ImportedGroup *root_group =
+          FindImportedGroup(*created_artwork, created_artwork->root_group_id);
+      int root_item_count = 0;
+      if (root_group != nullptr) {
+        root_item_count = static_cast<int>(root_group->child_group_ids.size() +
+                                           root_group->path_ids.size() +
+                                           root_group->dxf_text_ids.size());
+      } else {
+        root_item_count = static_cast<int>(created_artwork->paths.size() +
+                                           created_artwork->dxf_text.size());
+      }
+      if (root_item_count < 2) {
+        continue;
+      }
+
+      ImportedArtworkOperationResult group_result =
+          GroupImportedArtworkRootContents(state, appended_artwork_id);
+      if (group_result.success) {
+        grouped_artwork_count += 1;
+      }
     }
   }
   if (source_empty) {
@@ -2164,6 +2298,12 @@ ImportedArtworkOperationResult MoveImportedElementsToNewArtworks(
       (moved_count == 1 ? std::string() : std::string("s")) + " into " +
       std::to_string(subsets.size()) + " artwork" +
       (subsets.size() == 1 ? std::string() : std::string("s")) + ".";
+  if (create_groups_from_cuts && grouped_artwork_count > 0) {
+    result.message +=
+        " Auto-grouped " + std::to_string(grouped_artwork_count) +
+        " cut artwork" +
+        (grouped_artwork_count == 1 ? std::string() : std::string("s")) + ".";
+  }
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
@@ -2755,6 +2895,55 @@ PreviewImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
   return result;
 }
 
+ImportedArtworkOperationResult
+ApplyImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
+                            AutoCutPreviewAxisMode axis_mode, float minimum_gap,
+                            bool create_groups_from_cuts) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Auto cut requires a valid imported artwork.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  AutoCutPreviewPlan plan = BuildAutoCutPreviewPlan(
+      *artwork, axis_mode, NormalizeAutoCutMinimumGap(minimum_gap));
+  const int inferred_cut_count =
+      static_cast<int>(plan.layout.vertical_positions.size() +
+                       plan.layout.horizontal_positions.size());
+  result.skipped_count = static_cast<int>(plan.skipped_elements.size());
+
+  if (inferred_cut_count == 0 || plan.buckets.size() <= 1) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Auto cut needs movable content in more than one inferred "
+                     "band.";
+    SetLastImportedOperationIssueElements(state, artwork->id,
+                                          std::move(plan.skipped_elements));
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  result = MoveImportedElementsToNewArtworks(state, imported_artwork_id,
+                                             plan.buckets, " Auto Cut", "Cut",
+                                             create_groups_from_cuts);
+  result.skipped_count = static_cast<int>(plan.skipped_elements.size());
+  if (result.skipped_count > 0) {
+    result.message +=
+        " Skipped " + std::to_string(result.skipped_count) + " element" +
+        (result.skipped_count == 1 ? std::string() : std::string("s")) +
+        " that crossed an inferred cut band.";
+  }
+  ClearImportedArtworkAutoCutPreviewState(state);
+  SetLastImportedOperationIssueElements(state, imported_artwork_id,
+                                        std::move(plan.skipped_elements));
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
 void ClearImportedArtworkAutoCutPreview(CanvasState &state) {
   ClearImportedArtworkAutoCutPreviewState(state);
 }
@@ -2784,8 +2973,259 @@ ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
 }
 
 ImportedArtworkOperationResult
+GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  std::unordered_set<int> group_ids;
+  std::unordered_set<int> path_ids;
+  std::unordered_set<int> text_ids;
+  for (const ImportedElementSelection &selection :
+       state.selected_imported_elements) {
+    if (selection.kind == ImportedElementKind::Path) {
+      if (FindImportedPath(*artwork, selection.item_id) != nullptr) {
+        path_ids.insert(selection.item_id);
+      }
+    } else if (FindImportedDxfText(*artwork, selection.item_id) != nullptr) {
+      text_ids.insert(selection.item_id);
+    }
+  }
+
+  result.selected_count = CountGroupingTargets(group_ids, path_ids, text_ids);
+  if (result.selected_count <= 1) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Grouping needs at least two selected imported elements.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  const int parent_group_id =
+      ResolveGroupingParentGroupId(*artwork, path_ids, text_ids);
+  ImportedGroup *parent_group = FindImportedGroup(*artwork, parent_group_id);
+  if (parent_group == nullptr) {
+    result.message = "Imported grouping could not resolve a parent group.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  SetLastImportedOperationIssueElements(state, 0, {});
+
+  ImportedGroup new_group;
+  new_group.id = artwork->next_group_id++;
+  new_group.parent_group_id = parent_group_id;
+  new_group.label = "Group " + std::to_string(new_group.id);
+  MoveImportedGroupingTargetsToGroup(artwork, parent_group, group_ids, path_ids,
+                                     text_ids, &new_group);
+  artwork->groups.push_back(std::move(new_group));
+
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+  ClearSelectedImportedElements(state);
+  state.selected_imported_artwork_id = imported_artwork_id;
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Group,
+                                   imported_artwork_id,
+                                   artwork->groups.back().id};
+
+  result.success = true;
+  result.created_artwork_id = artwork->groups.back().id;
+  PopulateOperationReadiness(&result, *artwork);
+  result.message =
+      "Grouped " + std::to_string(result.selected_count) + " imported element" +
+      (result.selected_count == 1 ? std::string() : std::string("s")) +
+      " into a new group.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ImportedGroup *root_group =
+      FindImportedGroup(*artwork, artwork->root_group_id);
+  if (root_group == nullptr) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Imported artwork root group was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  std::unordered_set<int> group_ids(root_group->child_group_ids.begin(),
+                                    root_group->child_group_ids.end());
+  std::unordered_set<int> path_ids(root_group->path_ids.begin(),
+                                   root_group->path_ids.end());
+  std::unordered_set<int> text_ids(root_group->dxf_text_ids.begin(),
+                                   root_group->dxf_text_ids.end());
+
+  result.selected_count = CountGroupingTargets(group_ids, path_ids, text_ids);
+  if (result.selected_count <= 1) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Grouping artwork contents needs at least two root-level "
+                     "imported items.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  SetLastImportedOperationIssueElements(state, 0, {});
+
+  ImportedGroup new_group;
+  new_group.id = artwork->next_group_id++;
+  new_group.parent_group_id = artwork->root_group_id;
+  new_group.label = "Group " + std::to_string(new_group.id);
+
+  MoveImportedGroupingTargetsToGroup(artwork, root_group, group_ids, path_ids,
+                                     text_ids, &new_group);
+  artwork->groups.push_back(std::move(new_group));
+
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+  ClearSelectedImportedElements(state);
+  state.selected_imported_artwork_id = imported_artwork_id;
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Group,
+                                   imported_artwork_id,
+                                   artwork->groups.back().id};
+
+  result.success = true;
+  result.created_artwork_id = artwork->groups.back().id;
+  PopulateOperationReadiness(&result, *artwork);
+  result.message =
+      "Grouped " + std::to_string(result.selected_count) +
+      " root imported item" +
+      (result.selected_count == 1 ? std::string() : std::string("s")) +
+      " into a new top-level group.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  if (state.selected_imported_debug.artwork_id != imported_artwork_id ||
+      state.selected_imported_debug.kind != ImportedDebugSelectionKind::Group) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Select a non-root imported group to ungroup it.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ImportedGroup *group =
+      FindImportedGroup(*artwork, state.selected_imported_debug.item_id);
+  if (group == nullptr || group->id == artwork->root_group_id ||
+      group->parent_group_id == 0) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Select a non-root imported group to ungroup it.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  const int group_id = group->id;
+  const int parent_group_id = group->parent_group_id;
+  const std::vector<int> child_group_ids = group->child_group_ids;
+  const std::vector<int> path_ids = group->path_ids;
+  const std::vector<int> text_ids = group->dxf_text_ids;
+
+  ImportedGroup *parent_group = FindImportedGroup(*artwork, parent_group_id);
+  if (parent_group == nullptr) {
+    result.message = "Imported group could not be ungrouped because its parent "
+                     "was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  SetLastImportedOperationIssueElements(state, 0, {});
+
+  RemoveImportedGroupReference(&parent_group->child_group_ids, group_id);
+  parent_group->child_group_ids.insert(parent_group->child_group_ids.end(),
+                                       child_group_ids.begin(),
+                                       child_group_ids.end());
+  parent_group->path_ids.insert(parent_group->path_ids.end(), path_ids.begin(),
+                                path_ids.end());
+  parent_group->dxf_text_ids.insert(parent_group->dxf_text_ids.end(),
+                                    text_ids.begin(), text_ids.end());
+
+  for (ImportedGroup &child_group : artwork->groups) {
+    if (std::find(child_group_ids.begin(), child_group_ids.end(),
+                  child_group.id) != child_group_ids.end()) {
+      child_group.parent_group_id = parent_group_id;
+    }
+  }
+  for (ImportedPath &path : artwork->paths) {
+    if (std::find(path_ids.begin(), path_ids.end(), path.id) !=
+        path_ids.end()) {
+      path.parent_group_id = parent_group_id;
+    }
+  }
+  for (ImportedDxfText &text : artwork->dxf_text) {
+    if (std::find(text_ids.begin(), text_ids.end(), text.id) !=
+        text_ids.end()) {
+      text.parent_group_id = parent_group_id;
+    }
+  }
+
+  std::erase_if(artwork->groups, [group_id](const ImportedGroup &candidate) {
+    return candidate.id == group_id;
+  });
+  PruneEmptyGroups(*artwork);
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+  ClearSelectedImportedElements(state);
+  state.selected_imported_artwork_id = imported_artwork_id;
+  if (parent_group_id == artwork->root_group_id) {
+    state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                     imported_artwork_id, 0};
+  } else {
+    state.selected_imported_debug = {ImportedDebugSelectionKind::Group,
+                                     imported_artwork_id, parent_group_id};
+  }
+
+  result.success = true;
+  result.selected_count = static_cast<int>(path_ids.size() + text_ids.size());
+  PopulateOperationReadiness(&result, *artwork);
+  result.message = "Ungrouped imported group " + std::to_string(group_id) + ".";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
-                               int guide_id) {
+                               int guide_id, bool create_groups_from_cuts) {
   ImportedArtworkOperationResult result;
   result.artwork_id = imported_artwork_id;
 
@@ -2811,14 +3251,15 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
     return result;
   }
 
-  result = MoveImportedElementsToNewArtworks(
-      state, imported_artwork_id, plan.buckets, " Guide Split", "Split");
+  result = MoveImportedElementsToNewArtworks(state, imported_artwork_id,
+                                             plan.buckets, " Guide Split",
+                                             "Split", create_groups_from_cuts);
   result.skipped_count = static_cast<int>(plan.skipped_elements.size());
   if (result.skipped_count > 0) {
     result.message +=
         " Skipped " + std::to_string(result.skipped_count) + " element" +
         (result.skipped_count == 1 ? std::string() : std::string("s")) +
-        " that crossed the guide or could not be attached to an outer contour.";
+        " that crossed the guide band.";
   }
   ClearImportedArtworkSeparationPreviewState(state);
   SetLastImportedOperationIssueElements(state, imported_artwork_id,

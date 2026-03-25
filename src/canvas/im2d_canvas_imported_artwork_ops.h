@@ -31,12 +31,23 @@ ImportedArtworkOperationResult PreviewImportedArtworkAutoCut(
     CanvasState &state, int imported_artwork_id,
     AutoCutPreviewAxisMode axis_mode = AutoCutPreviewAxisMode::Both,
     float minimum_gap = 5.0f);
+ImportedArtworkOperationResult ApplyImportedArtworkAutoCut(
+    CanvasState &state, int imported_artwork_id,
+    AutoCutPreviewAxisMode axis_mode = AutoCutPreviewAxisMode::Both,
+    float minimum_gap = 5.0f, bool create_groups_from_cuts = false);
 void ClearImportedArtworkAutoCutPreview(CanvasState &state);
 ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
+GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id);
+ImportedArtworkOperationResult
+GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id);
+ImportedArtworkOperationResult
+UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id);
+ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
-                               int guide_id);
+                               int guide_id,
+                               bool create_groups_from_cuts = false);
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id);
 
 } // namespace im2d

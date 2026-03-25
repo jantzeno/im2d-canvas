@@ -30,6 +30,18 @@ struct ExportItem {
   WorldRect world_bounds;
 };
 
+struct ExportArtworkSelection {
+  const ImportedArtwork *artwork = nullptr;
+  std::unordered_set<int> group_ids;
+  std::unordered_set<int> path_ids;
+  std::unordered_set<int> text_ids;
+};
+
+struct ExportPlan {
+  std::vector<ExportArtworkSelection> artwork_selections;
+  std::vector<ExportItem> items;
+};
+
 std::string FormatNumber(float value) {
   std::ostringstream stream;
   stream << std::fixed << std::setprecision(6) << value;
@@ -320,7 +332,7 @@ void AppendSvgPathData(std::ostringstream &path_data,
 void AppendSerializedPath(std::ostringstream &svg,
                           const ImportedArtwork &artwork,
                           const ImportedPath &path, const ImVec2 &origin_offset,
-                          SvgExportResult *result) {
+                          SvgExportResult *result, int indent_level) {
   if (path.segments.empty()) {
     return;
   }
@@ -332,12 +344,14 @@ void AppendSerializedPath(std::ostringstream &svg,
     path_data << " Z";
   }
 
-  svg << "  <path d=\"" << path_data.str() << "\" fill=\"none\""
+  svg << std::string(static_cast<size_t>(indent_level) * 2, ' ') << "<path d=\""
+      << path_data.str() << "\" fill=\"none\""
       << " stroke=\"" << ColorToHex(path.stroke_color) << "\""
       << " stroke-width=\"" << FormatNumber(kSvgPreviewStrokeWidth)
       << "\" vector-effect=\"non-scaling-stroke\""
       << " data-im2d-kind=\"path\""
       << " data-im2d-source-artwork-id=\"" << artwork.id << "\""
+      << " data-im2d-parent-group-id=\"" << path.parent_group_id << "\""
       << " data-im2d-source-item-id=\"" << path.id << "\"";
   if (!path.label.empty()) {
     svg << " id=\"path-" << artwork.id << '-' << path.id << "\""
@@ -352,7 +366,7 @@ void AppendSerializedTextContour(std::ostringstream &svg,
                                  const ImportedDxfText &text,
                                  const ImportedTextContour &contour,
                                  const ImVec2 &origin_offset, bool placeholder,
-                                 SvgExportResult *result) {
+                                 SvgExportResult *result, int indent_level) {
   if (contour.segments.empty()) {
     return;
   }
@@ -364,12 +378,14 @@ void AppendSerializedTextContour(std::ostringstream &svg,
     path_data << " Z";
   }
 
-  svg << "  <path d=\"" << path_data.str() << "\" fill=\"none\""
+  svg << std::string(static_cast<size_t>(indent_level) * 2, ' ') << "<path d=\""
+      << path_data.str() << "\" fill=\"none\""
       << " stroke=\"" << ColorToHex(text.stroke_color) << "\""
       << " stroke-width=\"" << FormatNumber(kSvgPreviewStrokeWidth)
       << "\" vector-effect=\"non-scaling-stroke\""
       << " data-im2d-kind=\"dxf-text\""
       << " data-im2d-source-artwork-id=\"" << artwork.id << "\""
+      << " data-im2d-parent-group-id=\"" << text.parent_group_id << "\""
       << " data-im2d-source-item-id=\"" << text.id << "\""
       << " data-im2d-text-role=\"" << PathRoleName(contour.role) << "\"";
   if (placeholder) {
@@ -395,9 +411,130 @@ void AppendSerializedTextContour(std::ostringstream &svg,
   svg << " />\n";
 }
 
-std::optional<std::vector<ExportItem>>
-GatherSelectionItems(const CanvasState &state, const SvgExportRequest &request,
-                     SvgExportResult *result, WorldRect *world_bounds) {
+ExportArtworkSelection *
+FindOrAppendArtworkSelection(std::vector<ExportArtworkSelection> *selections,
+                             const ImportedArtwork *artwork) {
+  if (selections == nullptr || artwork == nullptr) {
+    return nullptr;
+  }
+  auto it = std::find_if(selections->begin(), selections->end(),
+                         [artwork](const ExportArtworkSelection &selection) {
+                           return selection.artwork == artwork;
+                         });
+  if (it != selections->end()) {
+    return &(*it);
+  }
+  selections->push_back({});
+  selections->back().artwork = artwork;
+  return &selections->back();
+}
+
+void CollectAncestorGroupIdsForExport(const ImportedArtwork &artwork,
+                                      int group_id,
+                                      std::unordered_set<int> *group_ids) {
+  int current_group_id = group_id;
+  while (current_group_id != 0 && group_ids != nullptr &&
+         group_ids->insert(current_group_id).second) {
+    const ImportedGroup *group = FindImportedGroup(artwork, current_group_id);
+    if (group == nullptr) {
+      break;
+    }
+    current_group_id = group->parent_group_id;
+  }
+}
+
+void AddPathToExportSelection(ExportArtworkSelection *selection,
+                              std::vector<ExportItem> *items,
+                              WorldRect *world_bounds, int path_id) {
+  if (selection == nullptr || selection->artwork == nullptr) {
+    return;
+  }
+  if (!selection->path_ids.insert(path_id).second) {
+    return;
+  }
+
+  const ImportedPath *path = FindImportedPath(*selection->artwork, path_id);
+  if (path == nullptr || path->segments.empty()) {
+    selection->path_ids.erase(path_id);
+    return;
+  }
+
+  CollectAncestorGroupIdsForExport(*selection->artwork, path->parent_group_id,
+                                   &selection->group_ids);
+  const WorldRect bounds = PathWorldBounds(*selection->artwork, *path);
+  if (items != nullptr) {
+    items->push_back({selection->artwork, path, nullptr, bounds});
+  }
+  if (world_bounds != nullptr) {
+    ExpandRect(world_bounds, bounds);
+  }
+}
+
+void AddTextToExportSelection(ExportArtworkSelection *selection,
+                              std::vector<ExportItem> *items,
+                              WorldRect *world_bounds, int text_id) {
+  if (selection == nullptr || selection->artwork == nullptr) {
+    return;
+  }
+  if (!selection->text_ids.insert(text_id).second) {
+    return;
+  }
+
+  const ImportedDxfText *text =
+      FindImportedDxfText(*selection->artwork, text_id);
+  if (text == nullptr) {
+    selection->text_ids.erase(text_id);
+    return;
+  }
+
+  CollectAncestorGroupIdsForExport(*selection->artwork, text->parent_group_id,
+                                   &selection->group_ids);
+  const WorldRect bounds = TextWorldBounds(*selection->artwork, *text);
+  if (items != nullptr) {
+    items->push_back({selection->artwork, nullptr, text, bounds});
+  }
+  if (world_bounds != nullptr) {
+    ExpandRect(world_bounds, bounds);
+  }
+}
+
+void AddGroupSubtreeToExportSelection(ExportArtworkSelection *selection,
+                                      std::vector<ExportItem> *items,
+                                      WorldRect *world_bounds, int group_id) {
+  if (selection == nullptr || selection->artwork == nullptr) {
+    return;
+  }
+
+  const ImportedGroup *group = FindImportedGroup(*selection->artwork, group_id);
+  if (group == nullptr) {
+    return;
+  }
+
+  selection->group_ids.insert(group->id);
+  for (const int child_group_id : group->child_group_ids) {
+    AddGroupSubtreeToExportSelection(selection, items, world_bounds,
+                                     child_group_id);
+  }
+  for (const int path_id : group->path_ids) {
+    AddPathToExportSelection(selection, items, world_bounds, path_id);
+  }
+  for (const int text_id : group->dxf_text_ids) {
+    AddTextToExportSelection(selection, items, world_bounds, text_id);
+  }
+}
+
+bool HasSerializableSelection(const ExportPlan &plan) {
+  return std::any_of(
+      plan.artwork_selections.begin(), plan.artwork_selections.end(),
+      [](const ExportArtworkSelection &selection) {
+        return !selection.path_ids.empty() || !selection.text_ids.empty();
+      });
+}
+
+std::optional<ExportPlan> GatherSelectionItems(const CanvasState &state,
+                                               const SvgExportRequest &request,
+                                               SvgExportResult *result,
+                                               WorldRect *world_bounds) {
   const int artwork_id = request.imported_artwork_id != 0
                              ? request.imported_artwork_id
                              : state.selected_imported_artwork_id;
@@ -406,56 +543,77 @@ GatherSelectionItems(const CanvasState &state, const SvgExportRequest &request,
     result->message = "Selection export requires a selected imported artwork.";
     return std::nullopt;
   }
-  if (state.selected_imported_elements.empty()) {
-    result->message =
-        "Selection export requires one or more selected imported elements.";
+  ExportPlan plan;
+  ExportArtworkSelection *selection =
+      FindOrAppendArtworkSelection(&plan.artwork_selections, artwork);
+  if (selection == nullptr) {
+    result->message = "Selection export could not initialize export state.";
     return std::nullopt;
   }
 
-  std::unordered_set<int> seen_paths;
-  std::unordered_set<int> seen_text;
-  std::vector<ExportItem> items;
-  items.reserve(state.selected_imported_elements.size());
-  for (const ImportedElementSelection &selection :
-       state.selected_imported_elements) {
-    if (selection.kind == ImportedElementKind::Path) {
-      if (!seen_paths.insert(selection.item_id).second) {
-        continue;
+  if (!state.selected_imported_elements.empty() &&
+      state.selected_imported_artwork_id == artwork->id) {
+    plan.items.reserve(state.selected_imported_elements.size());
+    for (const ImportedElementSelection &selected_element :
+         state.selected_imported_elements) {
+      if (selected_element.kind == ImportedElementKind::Path) {
+        AddPathToExportSelection(selection, &plan.items, world_bounds,
+                                 selected_element.item_id);
+      } else {
+        AddTextToExportSelection(selection, &plan.items, world_bounds,
+                                 selected_element.item_id);
       }
-      const ImportedPath *path = FindImportedPath(*artwork, selection.item_id);
-      if (path == nullptr || path->segments.empty()) {
-        continue;
+    }
+  } else if (state.selected_imported_debug.artwork_id == artwork->id) {
+    switch (state.selected_imported_debug.kind) {
+    case ImportedDebugSelectionKind::Artwork:
+      if (artwork->root_group_id != 0) {
+        AddGroupSubtreeToExportSelection(selection, &plan.items, world_bounds,
+                                         artwork->root_group_id);
+      } else {
+        for (const ImportedPath &path : artwork->paths) {
+          AddPathToExportSelection(selection, &plan.items, world_bounds,
+                                   path.id);
+        }
+        for (const ImportedDxfText &text : artwork->dxf_text) {
+          AddTextToExportSelection(selection, &plan.items, world_bounds,
+                                   text.id);
+        }
       }
-      const WorldRect bounds = PathWorldBounds(*artwork, *path);
-      items.push_back({artwork, path, nullptr, bounds});
-      ExpandRect(world_bounds, bounds);
-      continue;
+      break;
+    case ImportedDebugSelectionKind::Group:
+      CollectAncestorGroupIdsForExport(*artwork,
+                                       state.selected_imported_debug.item_id,
+                                       &selection->group_ids);
+      AddGroupSubtreeToExportSelection(selection, &plan.items, world_bounds,
+                                       state.selected_imported_debug.item_id);
+      break;
+    case ImportedDebugSelectionKind::Path:
+      AddPathToExportSelection(selection, &plan.items, world_bounds,
+                               state.selected_imported_debug.item_id);
+      break;
+    case ImportedDebugSelectionKind::DxfText:
+      AddTextToExportSelection(selection, &plan.items, world_bounds,
+                               state.selected_imported_debug.item_id);
+      break;
+    case ImportedDebugSelectionKind::None:
+      break;
     }
-
-    if (!seen_text.insert(selection.item_id).second) {
-      continue;
-    }
-    const ImportedDxfText *text =
-        FindImportedDxfText(*artwork, selection.item_id);
-    if (text == nullptr) {
-      continue;
-    }
-    const WorldRect bounds = TextWorldBounds(*artwork, *text);
-    items.push_back({artwork, nullptr, text, bounds});
-    ExpandRect(world_bounds, bounds);
   }
 
-  if (items.empty()) {
+  if (!HasSerializableSelection(plan)) {
     result->message =
-        "Selection export found no serializable imported elements.";
+        "Selection export requires selected imported elements, a selected "
+        "group, or the artwork root.";
     return std::nullopt;
   }
-  return items;
+  return plan;
 }
 
-std::optional<std::vector<ExportItem>>
-GatherExportAreaItems(const CanvasState &state, const SvgExportRequest &request,
-                      SvgExportResult *result, WorldRect *world_bounds) {
+std::optional<ExportPlan> GatherExportAreaItems(const CanvasState &state,
+                                                const SvgExportRequest &request,
+                                                SvgExportResult *result,
+                                                WorldRect *world_bounds) {
   const ExportArea *area = FindExportArea(state, request.export_area_id);
   if (area == nullptr) {
     result->message = "Export-area export requires at least one export area.";
@@ -464,11 +622,13 @@ GatherExportAreaItems(const CanvasState &state, const SvgExportRequest &request,
 
   *world_bounds = MakeRect(area->origin, ImVec2(area->origin.x + area->size.x,
                                                 area->origin.y + area->size.y));
-  std::vector<ExportItem> items;
+  ExportPlan plan;
   for (const ImportedArtwork &artwork : state.imported_artwork) {
     if (!artwork.visible) {
       continue;
     }
+
+    ExportArtworkSelection *selection = nullptr;
 
     for (const ImportedPath &path : artwork.paths) {
       if (path.segments.empty()) {
@@ -476,24 +636,213 @@ GatherExportAreaItems(const CanvasState &state, const SvgExportRequest &request,
       }
       const WorldRect bounds = PathWorldBounds(artwork, path);
       if (RectsIntersect(*world_bounds, bounds)) {
-        items.push_back({&artwork, &path, nullptr, bounds});
+        if (selection == nullptr) {
+          selection =
+              FindOrAppendArtworkSelection(&plan.artwork_selections, &artwork);
+        }
+        AddPathToExportSelection(selection, &plan.items, nullptr, path.id);
       }
     }
 
     for (const ImportedDxfText &text : artwork.dxf_text) {
       const WorldRect bounds = TextWorldBounds(artwork, text);
       if (RectsIntersect(*world_bounds, bounds)) {
-        items.push_back({&artwork, nullptr, &text, bounds});
+        if (selection == nullptr) {
+          selection =
+              FindOrAppendArtworkSelection(&plan.artwork_selections, &artwork);
+        }
+        AddTextToExportSelection(selection, &plan.items, nullptr, text.id);
       }
     }
   }
 
-  if (items.empty()) {
+  if (!HasSerializableSelection(plan)) {
     result->message =
         "No imported elements intersect the requested export area.";
     return std::nullopt;
   }
-  return items;
+  return plan;
+}
+
+bool SelectionContainsGroup(const ExportArtworkSelection &selection,
+                            int group_id) {
+  return selection.group_ids.contains(group_id);
+}
+
+bool SelectionContainsPath(const ExportArtworkSelection &selection,
+                           int path_id) {
+  return selection.path_ids.contains(path_id);
+}
+
+bool SelectionContainsText(const ExportArtworkSelection &selection,
+                           int text_id) {
+  return selection.text_ids.contains(text_id);
+}
+
+bool TextHasSerializableContours(const ImportedDxfText &text) {
+  for (const ImportedTextGlyph &glyph : text.glyphs) {
+    for (const ImportedTextContour &contour : glyph.contours) {
+      if (!contour.segments.empty()) {
+        return true;
+      }
+    }
+  }
+  return std::any_of(text.placeholder_contours.begin(),
+                     text.placeholder_contours.end(),
+                     [](const ImportedTextContour &contour) {
+                       return !contour.segments.empty();
+                     });
+}
+
+void AppendSerializedText(std::ostringstream &svg,
+                          const ImportedArtwork &artwork,
+                          const ImportedDxfText &text,
+                          const ImVec2 &origin_offset, SvgExportResult *result,
+                          int indent_level) {
+  if (!TextHasSerializableContours(text)) {
+    return;
+  }
+
+  const std::string indent(static_cast<size_t>(indent_level) * 2, ' ');
+  svg << indent << "<g data-im2d-kind=\"dxf-text-object\""
+      << " data-im2d-source-artwork-id=\"" << artwork.id << "\""
+      << " data-im2d-source-item-id=\"" << text.id << "\""
+      << " data-im2d-parent-group-id=\"" << text.parent_group_id << "\"";
+  if (!text.label.empty()) {
+    svg << " id=\"dxf-text-" << artwork.id << '-' << text.id << "\""
+        << " data-im2d-label=\"" << EscapeXml(text.label) << "\"";
+  }
+  if (!text.source_text.empty()) {
+    svg << " data-im2d-source-text=\"" << EscapeXml(text.source_text) << "\"";
+  }
+  svg << ">\n";
+
+  for (const ImportedTextGlyph &glyph : text.glyphs) {
+    for (const ImportedTextContour &contour : glyph.contours) {
+      AppendSerializedTextContour(svg, artwork, text, contour, origin_offset,
+                                  false, result, indent_level + 1);
+    }
+  }
+  for (const ImportedTextContour &contour : text.placeholder_contours) {
+    AppendSerializedTextContour(svg, artwork, text, contour, origin_offset,
+                                true, result, indent_level + 1);
+  }
+
+  svg << indent << "</g>\n";
+}
+
+void AppendSerializedGroupContents(std::ostringstream &svg,
+                                   const ExportArtworkSelection &selection,
+                                   const ImportedGroup &group,
+                                   const ImVec2 &origin_offset,
+                                   SvgExportResult *result, int indent_level);
+
+void AppendSerializedGroup(std::ostringstream &svg,
+                           const ExportArtworkSelection &selection,
+                           const ImportedGroup &group,
+                           const ImVec2 &origin_offset, SvgExportResult *result,
+                           int indent_level) {
+  const std::string indent(static_cast<size_t>(indent_level) * 2, ' ');
+  svg << indent << "<g data-im2d-kind=\"group\""
+      << " data-im2d-source-artwork-id=\"" << selection.artwork->id << "\""
+      << " data-im2d-source-group-id=\"" << group.id << "\""
+      << " data-im2d-parent-group-id=\"" << group.parent_group_id << "\"";
+  if (!group.label.empty()) {
+    svg << " id=\"group-" << selection.artwork->id << '-' << group.id << "\""
+        << " data-im2d-label=\"" << EscapeXml(group.label) << "\"";
+  }
+  svg << ">\n";
+  AppendSerializedGroupContents(svg, selection, group, origin_offset, result,
+                                indent_level + 1);
+  svg << indent << "</g>\n";
+}
+
+void AppendSerializedGroupContents(std::ostringstream &svg,
+                                   const ExportArtworkSelection &selection,
+                                   const ImportedGroup &group,
+                                   const ImVec2 &origin_offset,
+                                   SvgExportResult *result, int indent_level) {
+  for (const int child_group_id : group.child_group_ids) {
+    if (!SelectionContainsGroup(selection, child_group_id)) {
+      continue;
+    }
+    const ImportedGroup *child_group =
+        FindImportedGroup(*selection.artwork, child_group_id);
+    if (child_group != nullptr) {
+      AppendSerializedGroup(svg, selection, *child_group, origin_offset, result,
+                            indent_level);
+    }
+  }
+
+  for (const int path_id : group.path_ids) {
+    if (!SelectionContainsPath(selection, path_id)) {
+      continue;
+    }
+    const ImportedPath *path = FindImportedPath(*selection.artwork, path_id);
+    if (path != nullptr) {
+      AppendSerializedPath(svg, *selection.artwork, *path, origin_offset,
+                           result, indent_level);
+    }
+  }
+
+  for (const int text_id : group.dxf_text_ids) {
+    if (!SelectionContainsText(selection, text_id)) {
+      continue;
+    }
+    const ImportedDxfText *text =
+        FindImportedDxfText(*selection.artwork, text_id);
+    if (text != nullptr) {
+      AppendSerializedText(svg, *selection.artwork, *text, origin_offset,
+                           result, indent_level);
+    }
+  }
+}
+
+void AppendSerializedArtwork(std::ostringstream &svg,
+                             const ExportArtworkSelection &selection,
+                             const ImVec2 &origin_offset,
+                             SvgExportResult *result) {
+  if (selection.artwork == nullptr) {
+    return;
+  }
+
+  svg << "  <g data-im2d-kind=\"artwork\""
+      << " data-im2d-source-artwork-id=\"" << selection.artwork->id << "\"";
+  if (!selection.artwork->name.empty()) {
+    svg << " id=\"artwork-" << selection.artwork->id << "\""
+        << " data-im2d-label=\"" << EscapeXml(selection.artwork->name) << "\"";
+  }
+  if (!selection.artwork->source_path.empty()) {
+    svg << " data-im2d-source-path=\""
+        << EscapeXml(selection.artwork->source_path) << "\"";
+  }
+  if (!selection.artwork->source_format.empty()) {
+    svg << " data-im2d-source-format=\""
+        << EscapeXml(selection.artwork->source_format) << "\"";
+  }
+  svg << ">\n";
+
+  const ImportedGroup *root_group =
+      FindImportedGroup(*selection.artwork, selection.artwork->root_group_id);
+  if (root_group != nullptr) {
+    AppendSerializedGroupContents(svg, selection, *root_group, origin_offset,
+                                  result, 2);
+  } else {
+    for (const ImportedPath &path : selection.artwork->paths) {
+      if (SelectionContainsPath(selection, path.id)) {
+        AppendSerializedPath(svg, *selection.artwork, path, origin_offset,
+                             result, 2);
+      }
+    }
+    for (const ImportedDxfText &text : selection.artwork->dxf_text) {
+      if (SelectionContainsText(selection, text.id)) {
+        AppendSerializedText(svg, *selection.artwork, text, origin_offset,
+                             result, 2);
+      }
+    }
+  }
+
+  svg << "  </g>\n";
 }
 
 } // namespace
@@ -502,20 +851,20 @@ SvgExportResult ExportSvg(const CanvasState &state,
                           const SvgExportRequest &request) {
   SvgExportResult result;
   WorldRect world_bounds;
-  std::optional<std::vector<ExportItem>> items;
+  std::optional<ExportPlan> plan;
   if (request.scope == SvgExportScope::ActiveSelection) {
-    items = GatherSelectionItems(state, request, &result, &world_bounds);
+    plan = GatherSelectionItems(state, request, &result, &world_bounds);
   } else {
-    items = GatherExportAreaItems(state, request, &result, &world_bounds);
+    plan = GatherExportAreaItems(state, request, &result, &world_bounds);
   }
 
-  if (!items.has_value() || !world_bounds.valid) {
+  if (!plan.has_value() || !world_bounds.valid) {
     return result;
   }
 
   result.bounds_min = world_bounds.min;
   result.bounds_max = world_bounds.max;
-  PreflightExportDiagnostics(*items, &result);
+  PreflightExportDiagnostics(plan->items, &result);
   const bool placeholder_text_blocked =
       result.placeholder_text_count > 0 && !request.allow_placeholder_text;
   FinalizeExportWarnings(&result, placeholder_text_blocked);
@@ -541,27 +890,8 @@ SvgExportResult ExportSvg(const CanvasState &state,
                                                            : "export-area")
       << "\">\n";
 
-  for (const ExportItem &item : *items) {
-    if (item.path != nullptr) {
-      AppendSerializedPath(svg, *item.artwork, *item.path, world_bounds.min,
-                           &result);
-      continue;
-    }
-
-    if (item.text == nullptr) {
-      continue;
-    }
-
-    for (const ImportedTextGlyph &glyph : item.text->glyphs) {
-      for (const ImportedTextContour &contour : glyph.contours) {
-        AppendSerializedTextContour(svg, *item.artwork, *item.text, contour,
-                                    world_bounds.min, false, &result);
-      }
-    }
-    for (const ImportedTextContour &contour : item.text->placeholder_contours) {
-      AppendSerializedTextContour(svg, *item.artwork, *item.text, contour,
-                                  world_bounds.min, true, &result);
-    }
+  for (const ExportArtworkSelection &selection : plan->artwork_selections) {
+    AppendSerializedArtwork(svg, selection, world_bounds.min, &result);
   }
 
   if (!result.warnings.empty()) {

@@ -425,6 +425,21 @@ ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
 }
 
 ImportedArtworkOperationResult
+GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
+  return im2d::GroupSelectedImportedElements(state, imported_artwork_id);
+}
+
+ImportedArtworkOperationResult
+GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id) {
+  return im2d::GroupImportedArtworkRootContents(state, imported_artwork_id);
+}
+
+ImportedArtworkOperationResult
+UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id) {
+  return im2d::UngroupSelectedImportedGroup(state, imported_artwork_id);
+}
+
+ImportedArtworkOperationResult
 PreviewSeparateImportedArtworkByGuide(CanvasState &state,
                                       int imported_artwork_id, int guide_id) {
   return im2d::PreviewSeparateImportedArtworkByGuide(state, imported_artwork_id,
@@ -443,15 +458,24 @@ PreviewImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
                                              axis_mode, minimum_gap);
 }
 
+ImportedArtworkOperationResult
+ApplyImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
+                            AutoCutPreviewAxisMode axis_mode, float minimum_gap,
+                            bool create_groups_from_cuts) {
+  return im2d::ApplyImportedArtworkAutoCut(state, imported_artwork_id,
+                                           axis_mode, minimum_gap,
+                                           create_groups_from_cuts);
+}
+
 void ClearImportedArtworkAutoCutPreview(CanvasState &state) {
   im2d::ClearImportedArtworkAutoCutPreview(state);
 }
 
 ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
-                               int guide_id) {
-  return im2d::SeparateImportedArtworkByGuide(state, imported_artwork_id,
-                                              guide_id);
+                               int guide_id, bool create_groups_from_cuts) {
+  return im2d::SeparateImportedArtworkByGuide(
+      state, imported_artwork_id, guide_id, create_groups_from_cuts);
 }
 
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id) {

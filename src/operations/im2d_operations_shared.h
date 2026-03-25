@@ -288,20 +288,95 @@ inline ImportedArtworkOperationResult PrepareImportedArtworkForCuttingShared(
   return result;
 }
 
+inline void CollectImportedGroupElementIdsShared(
+    const ImportedArtwork &artwork, int group_id,
+    std::unordered_set<int> *path_ids, std::unordered_set<int> *text_ids,
+    std::unordered_set<int> *visited_group_ids) {
+  if (path_ids == nullptr || text_ids == nullptr ||
+      visited_group_ids == nullptr ||
+      !visited_group_ids->insert(group_id).second) {
+    return;
+  }
+
+  const ImportedGroup *group = FindImportedGroup(artwork, group_id);
+  if (group == nullptr) {
+    return;
+  }
+
+  path_ids->insert(group->path_ids.begin(), group->path_ids.end());
+  text_ids->insert(group->dxf_text_ids.begin(), group->dxf_text_ids.end());
+  for (const int child_group_id : group->child_group_ids) {
+    CollectImportedGroupElementIdsShared(artwork, child_group_id, path_ids,
+                                         text_ids, visited_group_ids);
+  }
+}
+
+inline void ResolveExtractedElementIdsShared(
+    const CanvasState &state, int imported_artwork_id,
+    std::unordered_set<int> *path_ids, std::unordered_set<int> *text_ids) {
+  if (path_ids == nullptr || text_ids == nullptr) {
+    return;
+  }
+
+  if (state.selected_imported_artwork_id == imported_artwork_id &&
+      !state.selected_imported_elements.empty()) {
+    for (const ImportedElementSelection &selection :
+         state.selected_imported_elements) {
+      if (selection.kind == ImportedElementKind::Path) {
+        path_ids->insert(selection.item_id);
+      } else {
+        text_ids->insert(selection.item_id);
+      }
+    }
+  }
+  if (!path_ids->empty() || !text_ids->empty()) {
+    return;
+  }
+
+  if (state.selected_imported_debug.artwork_id != imported_artwork_id) {
+    return;
+  }
+
+  const ImportedArtwork *artwork =
+      FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    return;
+  }
+
+  switch (state.selected_imported_debug.kind) {
+  case ImportedDebugSelectionKind::Group: {
+    std::unordered_set<int> visited_group_ids;
+    CollectImportedGroupElementIdsShared(
+        *artwork, state.selected_imported_debug.item_id, path_ids, text_ids,
+        &visited_group_ids);
+    return;
+  }
+  case ImportedDebugSelectionKind::Path:
+    if (FindImportedPath(*artwork, state.selected_imported_debug.item_id) !=
+        nullptr) {
+      path_ids->insert(state.selected_imported_debug.item_id);
+    }
+    return;
+  case ImportedDebugSelectionKind::DxfText:
+    if (FindImportedDxfText(*artwork, state.selected_imported_debug.item_id) !=
+        nullptr) {
+      text_ids->insert(state.selected_imported_debug.item_id);
+    }
+    return;
+  case ImportedDebugSelectionKind::Artwork:
+  case ImportedDebugSelectionKind::None:
+    return;
+  }
+}
+
 template <typename MoveFn, typename SetIssuesFn, typename SetLastFn>
 inline ImportedArtworkOperationResult ExtractSelectedImportedElementsShared(
     CanvasState &state, int imported_artwork_id, MoveFn move_fn,
     SetIssuesFn set_issues_fn, SetLastFn set_last_fn) {
   std::unordered_set<int> path_ids;
   std::unordered_set<int> text_ids;
-  for (const ImportedElementSelection &selection :
-       state.selected_imported_elements) {
-    if (selection.kind == ImportedElementKind::Path) {
-      path_ids.insert(selection.item_id);
-    } else {
-      text_ids.insert(selection.item_id);
-    }
-  }
+  ResolveExtractedElementIdsShared(state, imported_artwork_id, &path_ids,
+                                   &text_ids);
 
   ImportedArtworkOperationResult result =
       move_fn(state, imported_artwork_id, path_ids, text_ids, " Extracted",
