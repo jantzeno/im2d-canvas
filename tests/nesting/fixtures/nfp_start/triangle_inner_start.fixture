@@ -1,0 +1,6 @@
+# Non-rectangle inner-NFP scaffold case: the part can start at the container origin.
+name = triangle_inner_start
+container = 0,0; 6,0; 0,6
+part = 0,0; 1,0; 0,1
+expected_start = 0,0
+expected = none

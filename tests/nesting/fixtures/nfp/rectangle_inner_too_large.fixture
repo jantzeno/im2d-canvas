@@ -1,0 +1,5 @@
+# A part larger than the rectangular container should produce no inner NFP.
+name = rectangle_inner_too_large
+container = 0,0; 10,0; 10,6; 0,6
+part = 0,0; 12,0; 12,4; 0,4
+expected = none

@@ -1,0 +1,5 @@
+# The part anchor remains the first contour point, matching SVGnest's use of B[0].
+name = rectangle_inner_offset_anchor
+container = -2,-1; 4,-1; 4,5; -2,5
+part = 1,1; 3,1; 3,2; 1,2
+expected = -2,-1; 2,-1; 2,4; -2,4

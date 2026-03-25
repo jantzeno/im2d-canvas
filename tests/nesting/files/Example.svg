@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 10000 10000">
+
+	
+	<!-- Use as bin: A polygon with indents is somewhat more difficult, be sure to select "explore concave areas" -->
+	<polygon fill="lightgray" stroke="#010101" stroke-miterlimit="10" points="2 1250, 800 1250, 800 1170, 900 1170, 900 1250, 1600 1250, 1600 1170, 1700 1170, 1700 1250, 2200 1250, 2200 1170, 2300 1170, 2300 1250, 2500 1250, 2500 2,2 2,2 1250 "/>
+
+	<!-- Use as bin: No indents -->
+	<!--
+	<polygon fill="lightgray" stroke="#010101" stroke-miterlimit="10" points="2 1250, 2500 1250, 2500 2,2 2,2 1250 "/>
+	-->
+	    
+	<!-- Parts -->
+	<polygon fill="red" stroke="#010101" points="2600 400, 3400 400, 3400 0, 2600 0 "/>
+    <polygon fill="yellow" stroke="#010101" points="3600 200, 4400 200, 4400 0, 3600 0 "/>
+    <polygon fill="green" stroke="#010101" points="4600 100, 5400 100, 5400 0, 4600 0 "/>
+    <polygon fill="blue" stroke="#010101" points="5600 200, 6400 200, 6400 0, 5600 0 "/>
+
+    <polygon fill="red" stroke="#010101" points="2600 1000, 3400 1000, 3400 600, 2600 600 "/>
+    <polygon fill="yellow" stroke="#010101" points="3600 700, 4400 700, 4400 500, 3600 500 "/>
+    <polygon fill="green" stroke="#010101" points="4600 600, 5400 600, 5400 500, 4600 500 "/>
+    <polygon fill="blue" stroke="#010101" points="5600 700, 6400 700, 6400 500, 5600 500 "/>
+
+    <polygon fill="red" stroke="#010101" points="2600 1500, 3400 1500, 3400 1100, 2600 1100 "/>
+    <polygon fill="yellow" stroke="#010101" points="3600 1200, 4400 1200, 4400 1000, 3600 1000 "/>
+    <polygon fill="green" stroke="#010101" points="4600 1100, 5400 1100, 5400 1000, 4600 1000 "/>
+    <polygon fill="blue" stroke="#010101" points="5600 1200, 6400 1200, 6400 1000, 5600 1000 "/>
+		
+</svg>

@@ -1,0 +1,7 @@
+# The first candidate start point is already present in the explored NFP, so the search should find another one.
+name = square_skip_existing_start
+container = 0,0; 4,0; 4,4; 0,4
+part = 0,0; 1,0; 1,1; 0,1
+existing = 0,0
+expected_start = 3,0
+expected = none
