@@ -191,22 +191,6 @@ ImRect ImportedElementScreenRect(const CanvasState &state,
   return WorldRectToScreenRect(state, canvas_min, ImRect(world_min, world_max));
 }
 
-ImU32 ImportedIssueOverlayColor(uint32_t issue_flags) {
-  if (HasImportedElementIssueFlag(issue_flags,
-                                  ImportedElementIssueFlagAmbiguousCleanup)) {
-    return IM_COL32(62, 176, 166, 255);
-  }
-  if (HasImportedElementIssueFlag(issue_flags,
-                                  ImportedElementIssueFlagOrphanHole)) {
-    return IM_COL32(232, 84, 62, 255);
-  }
-  if (HasImportedElementIssueFlag(issue_flags,
-                                  ImportedElementIssueFlagPlaceholderText)) {
-    return IM_COL32(232, 171, 62, 255);
-  }
-  return IM_COL32(240, 146, 61, 255);
-}
-
 struct PreviewOverlayColors {
   ImU32 stroke = 0;
   ImU32 fill = 0;
@@ -219,20 +203,52 @@ struct PreviewBucketRegion {
   PreviewOverlayColors colors;
 };
 
+ImU32 ThemeColorToU32(const ImVec4 &color) {
+  return ImGui::ColorConvertFloat4ToU32(color);
+}
+
+PreviewOverlayColors MakePreviewOverlayColors(const ImVec4 &stroke,
+                                              const ImVec4 &fill) {
+  return {ThemeColorToU32(stroke), ThemeColorToU32(fill)};
+}
+
+ImU32 ImportedIssueOverlayColor(const CanvasTheme &theme,
+                                const uint32_t issue_flags) {
+  if (HasImportedElementIssueFlag(issue_flags,
+                                  ImportedElementIssueFlagAmbiguousCleanup)) {
+    return ThemeColorToU32(theme.imported_issue_ambiguous_cleanup);
+  }
+  if (HasImportedElementIssueFlag(issue_flags,
+                                  ImportedElementIssueFlagOrphanHole)) {
+    return ThemeColorToU32(theme.imported_issue_orphan_hole);
+  }
+  if (HasImportedElementIssueFlag(issue_flags,
+                                  ImportedElementIssueFlagPlaceholderText)) {
+    return ThemeColorToU32(theme.imported_issue_placeholder_text);
+  }
+  return ThemeColorToU32(theme.imported_issue_default);
+}
+
 PreviewOverlayColors GetSeparationPreviewColors(
-    ImportedSeparationPreviewClassification classification) {
+    const CanvasTheme &theme,
+    const ImportedSeparationPreviewClassification classification) {
   switch (classification) {
   case ImportedSeparationPreviewClassification::Assigned:
-    return {IM_COL32(90, 160, 255, 235), IM_COL32(90, 160, 255, 52)};
+    return MakePreviewOverlayColors(theme.preview_assigned_stroke,
+                                    theme.preview_assigned_fill);
   case ImportedSeparationPreviewClassification::Crossing:
-    return {IM_COL32(242, 177, 52, 235), IM_COL32(242, 177, 52, 52)};
+    return MakePreviewOverlayColors(theme.preview_crossing_stroke,
+                                    theme.preview_crossing_fill);
   case ImportedSeparationPreviewClassification::Orphan:
-    return {IM_COL32(232, 84, 62, 235), IM_COL32(232, 84, 62, 44)};
+    return MakePreviewOverlayColors(theme.preview_orphan_stroke,
+                                    theme.preview_orphan_fill);
   }
-  return {IM_COL32(255, 255, 255, 255), IM_COL32(255, 255, 255, 32)};
+  return MakePreviewOverlayColors(theme.preview_default_stroke,
+                                  theme.preview_default_fill);
 }
 
 std::vector<PreviewBucketRegion> BuildPreviewBucketRegions(
+    const CanvasTheme &theme,
     const std::vector<ImportedSeparationPreviewPart> &parts) {
   std::vector<PreviewBucketRegion> bucket_regions;
   for (const ImportedSeparationPreviewPart &part : parts) {
@@ -252,19 +268,12 @@ std::vector<PreviewBucketRegion> BuildPreviewBucketRegions(
     }
 
     PreviewOverlayColors colors =
-        GetSeparationPreviewColors(part.classification);
-    constexpr ImU32 kBucketStrokes[] = {
-        IM_COL32(90, 160, 255, 235),  IM_COL32(92, 201, 110, 235),
-        IM_COL32(195, 120, 255, 235), IM_COL32(61, 201, 194, 235),
-        IM_COL32(255, 136, 92, 235),  IM_COL32(240, 210, 75, 235)};
-    constexpr ImU32 kBucketFills[] = {
-        IM_COL32(90, 160, 255, 28),  IM_COL32(92, 201, 110, 28),
-        IM_COL32(195, 120, 255, 28), IM_COL32(61, 201, 194, 28),
-        IM_COL32(255, 136, 92, 28),  IM_COL32(240, 210, 75, 28)};
-    const size_t palette_index =
-        static_cast<size_t>(part.bucket_index) % std::size(kBucketStrokes);
-    colors.stroke = kBucketStrokes[palette_index];
-    colors.fill = kBucketFills[palette_index];
+        GetSeparationPreviewColors(theme, part.classification);
+    const size_t palette_index = static_cast<size_t>(part.bucket_index) %
+                                 theme.preview_bucket_strokes.size();
+    colors.stroke =
+        ThemeColorToU32(theme.preview_bucket_strokes[palette_index]);
+    colors.fill = ThemeColorToU32(theme.preview_bucket_fills[palette_index]);
     bucket_regions.push_back(
         {part.bucket_index, part.bucket_column, part.bucket_row, colors});
   }
@@ -294,14 +303,17 @@ void DrawBandPreviewOverlay(
   const ImVec2 banner_min(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f);
   const ImVec2 banner_max(canvas_rect.Min.x + 360.0f,
                           canvas_rect.Min.y + 72.0f);
-  draw_list->AddRectFilled(banner_min, banner_max, IM_COL32(20, 24, 34, 224),
-                           6.0f);
-  draw_list->AddRect(banner_min, banner_max, IM_COL32(140, 170, 220, 220), 6.0f,
+  draw_list->AddRectFilled(
+      banner_min, banner_max,
+      ThemeColorToU32(state.theme.preview_banner_background), 6.0f);
+  draw_list->AddRect(banner_min, banner_max,
+                     ThemeColorToU32(state.theme.preview_banner_border), 6.0f,
                      0, 1.5f);
   draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 10.0f),
-                     IM_COL32(230, 236, 248, 255), title);
+                     ThemeColorToU32(state.theme.preview_banner_title), title);
   draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 34.0f),
-                     IM_COL32(180, 196, 228, 255), preview_summary.c_str());
+                     ThemeColorToU32(state.theme.preview_banner_summary),
+                     preview_summary.c_str());
 
   ImRect preview_artwork_rect = canvas_rect;
   if (const ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id)) {
@@ -311,7 +323,7 @@ void DrawBandPreviewOverlay(
   }
 
   const std::vector<PreviewBucketRegion> bucket_regions =
-      BuildPreviewBucketRegions(parts);
+      BuildPreviewBucketRegions(state.theme, parts);
   const ImVec2 visible_world_min =
       ScreenToWorld(state, canvas_rect.Min, canvas_rect.Min);
   const ImVec2 visible_world_max =
@@ -364,7 +376,7 @@ void DrawBandPreviewOverlay(
   std::string label_scratch;
   for (const ImportedSeparationPreviewPart &part : parts) {
     PreviewOverlayColors colors =
-        GetSeparationPreviewColors(part.classification);
+        GetSeparationPreviewColors(state.theme, part.classification);
     if (part.classification ==
         ImportedSeparationPreviewClassification::Assigned) {
       continue;
@@ -380,8 +392,9 @@ void DrawBandPreviewOverlay(
                                             part.bucket_index, &label_scratch);
     const ImVec2 label_min(screen_rect.Min.x + 4.0f, screen_rect.Min.y + 4.0f);
     const ImVec2 label_max(label_min.x + 72.0f, label_min.y + 20.0f);
-    draw_list->AddRectFilled(label_min, label_max, IM_COL32(16, 18, 26, 220),
-                             4.0f);
+    draw_list->AddRectFilled(
+        label_min, label_max,
+        ThemeColorToU32(state.theme.preview_label_background), 4.0f);
     draw_list->AddRect(label_min, label_max, colors.stroke, 4.0f, 0, 1.5f);
     draw_list->AddText(ImVec2(label_min.x + 6.0f, label_min.y + 3.0f),
                        colors.stroke, label);
@@ -1222,7 +1235,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_selected);
   const ImU32 element_selection_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.guide_hovered);
-  const ImU32 operation_issue_color = IM_COL32(90, 170, 255, 255);
+  const ImU32 operation_issue_color =
+      ThemeColorToU32(state.theme.operation_issue);
 
   for (const ImportedArtwork &artwork : state.imported_artwork) {
     if (!artwork.visible) {
@@ -1243,9 +1257,10 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
           text.issue_flags != ImportedElementIssueFlagNone) {
         const ImRect text_rect = ImportedElementScreenRect(
             state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
-        draw_list->AddRect(text_rect.Min, text_rect.Max,
-                           ImportedIssueOverlayColor(text.issue_flags), 3.0f, 0,
-                           2.0f);
+        draw_list->AddRect(
+            text_rect.Min, text_rect.Max,
+            ImportedIssueOverlayColor(state.theme, text.issue_flags), 3.0f, 0,
+            2.0f);
       }
       if (show_issue_overlays &&
           IsLastOperationIssueElement(state, artwork.id,
@@ -1301,9 +1316,10 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
           path.issue_flags != ImportedElementIssueFlagNone) {
         const ImRect path_rect = ImportedElementScreenRect(
             state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
-        draw_list->AddRect(path_rect.Min, path_rect.Max,
-                           ImportedIssueOverlayColor(path.issue_flags), 3.0f, 0,
-                           2.0f);
+        draw_list->AddRect(
+            path_rect.Min, path_rect.Max,
+            ImportedIssueOverlayColor(state.theme, path.issue_flags), 3.0f, 0,
+            2.0f);
       }
       if (show_issue_overlays &&
           IsLastOperationIssueElement(state, artwork.id,
