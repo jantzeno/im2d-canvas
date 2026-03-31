@@ -1,6 +1,29 @@
 set_project("im2d")
 set_version("0.1.0", {build = "%Y%m%d%H%M"})
 set_languages("c++20")
+
+local workspace_root = path.absolute(path.join(os.projectdir(), ".."))
+local workspace_compile_commands_script = path.join(workspace_root, "merge_compile_commands.py")
+local workspace_compile_commands_output = path.join(workspace_root, "compile_commands.json")
+local workspace_compile_commands_merged = false
+
+rule("workspace.merge_compile_commands")
+    after_build(function(target)
+        if target:kind() == "phony"
+            or workspace_compile_commands_merged
+            or not os.isfile(workspace_compile_commands_script) then
+            return
+        end
+
+        workspace_compile_commands_merged = true
+        os.execv("python3", {
+            workspace_compile_commands_script,
+            "--workspace-root", workspace_root,
+            "--output", workspace_compile_commands_output
+        })
+    end)
+rule_end()
+
 add_rules("mode.debug", "mode.release")
 
 add_requires("libsdl3")
@@ -9,7 +32,24 @@ add_requires("imgui", { configs = { sdl3 = true, opengl3 = true } })
 add_requires("freetype")
 add_requires("catch2")
 
-add_rules("plugin.compile_commands.autoupdate", {outputdir = ".vscode"})
+add_rules("plugin.compile_commands.autoupdate", {outputdir = ".vscode", lsp = "clangd"})
+add_rules("workspace.merge_compile_commands")
+
+target("merge_workspace_compile_commands")
+    set_kind("phony")
+    set_default(false)
+    on_build(function()
+        if workspace_compile_commands_merged or not os.isfile(workspace_compile_commands_script) then
+            return
+        end
+
+        workspace_compile_commands_merged = true
+        os.execv("python3", {
+            workspace_compile_commands_script,
+            "--workspace-root", workspace_root,
+            "--output", workspace_compile_commands_output
+        })
+    end)
 
 target("vendor_spdlog")
     set_kind("headeronly")
@@ -199,4 +239,3 @@ end
 --
 -- @endcode
 --
-

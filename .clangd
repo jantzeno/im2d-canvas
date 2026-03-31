@@ -1,0 +1,14 @@
+CompileFlags:
+  CompilationDatabase: ".vscode"
+  Add:
+    - -std=c++20
+    - -Wall
+    - -Wextra
+    - -Wno-unused-parameter
+    - -Wno-missing-field-initializers
+
+Index:
+  Background: Build
+
+Hover:
+  ShowAKA: Yes
