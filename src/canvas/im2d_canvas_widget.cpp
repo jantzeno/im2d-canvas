@@ -2004,6 +2004,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                      ImGui::ColorConvertFloat4ToU32(state.theme.ruler_text),
                      MeasurementUnitLabel(state.ruler_unit));
 
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                      options.context_menu_padding);
+
   if (ImGui::BeginPopup("ruler_context_menu")) {
     ImGui::TextUnformatted("Ruler Units");
     ImGui::Separator();
@@ -2100,6 +2103,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     ImGui::MenuItem("Placeholder", nullptr, false, false);
     ImGui::EndPopup();
   }
+
+  ImGui::PopStyleVar();
 
   ImGui::PopID();
   return canvas_hovered;

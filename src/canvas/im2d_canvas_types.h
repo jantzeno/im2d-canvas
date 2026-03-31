@@ -506,6 +506,7 @@ struct CanvasWidgetOptions {
   float ruler_thickness = 28.0f;
   float min_working_area_size = 16.0f;
   float resize_handle_size = 10.0f;
+  ImVec2 context_menu_padding = ImVec2(10.0f, 8.0f);
 };
 
 struct WorkingAreaCreateInfo {
