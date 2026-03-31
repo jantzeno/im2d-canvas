@@ -1,5 +1,6 @@
 #include "im2d_canvas_snap.h"
 
+#include "im2d_canvas_document.h"
 #include "im2d_canvas_units.h"
 
 #include <cmath>
@@ -60,6 +61,26 @@ SnapResult SnapAxisCoordinate(const CanvasState &state,
     const float snapped = std::round(value / minor_spacing) * minor_spacing;
     ConsiderCandidate(state, value, snapped, SnapTargetKind::GridMinor, 0,
                       result);
+  }
+
+  if (state.snapping.to_margins) {
+    for (const ExportArea &area : state.export_areas) {
+      if (!area.visible) {
+        continue;
+      }
+
+      if (orientation == GuideOrientation::Vertical) {
+        ConsiderCandidate(state, value, area.origin.x, SnapTargetKind::Margin, 0,
+                          result);
+        ConsiderCandidate(state, value, area.origin.x + area.size.x,
+                          SnapTargetKind::Margin, 0, result);
+      } else {
+        ConsiderCandidate(state, value, area.origin.y, SnapTargetKind::Margin, 0,
+                          result);
+        ConsiderCandidate(state, value, area.origin.y + area.size.y,
+                          SnapTargetKind::Margin, 0, result);
+      }
+    }
   }
 
   return result;

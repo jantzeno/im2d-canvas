@@ -25,6 +25,7 @@ enum class SnapTargetKind {
   Guide,
   GridMajor,
   GridMinor,
+  Margin,
 };
 
 enum WorkingAreaFlags : uint32_t {
@@ -127,6 +128,7 @@ struct SnapSettings {
   bool to_guides = true;
   bool to_grid_major = true;
   bool to_grid_minor = false;
+  bool to_margins = false;
   float screen_threshold = 10.0f;
 };
 

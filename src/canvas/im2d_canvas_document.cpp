@@ -398,6 +398,24 @@ const Guide *FindGuide(const CanvasState &state, int guide_id) {
   return it == state.guides.end() ? nullptr : &(*it);
 }
 
+ExportArea *FindExportArea(CanvasState &state, int export_area_id) {
+  auto it =
+      std::find_if(state.export_areas.begin(), state.export_areas.end(),
+                   [export_area_id](const ExportArea &area) {
+                     return area.id == export_area_id;
+                   });
+  return it == state.export_areas.end() ? nullptr : &(*it);
+}
+
+const ExportArea *FindExportArea(const CanvasState &state, int export_area_id) {
+  auto it =
+      std::find_if(state.export_areas.begin(), state.export_areas.end(),
+                   [export_area_id](const ExportArea &area) {
+                     return area.id == export_area_id;
+                   });
+  return it == state.export_areas.end() ? nullptr : &(*it);
+}
+
 ImportedArtwork *FindImportedArtwork(CanvasState &state,
                                      int imported_artwork_id) {
   auto it =

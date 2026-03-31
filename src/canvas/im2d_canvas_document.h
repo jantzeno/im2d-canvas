@@ -41,6 +41,8 @@ void ImportedLocalBoundsToWorldBounds(const ImportedArtwork &artwork,
 WorkingArea *FindWorkingArea(CanvasState &state, int working_area_id);
 const WorkingArea *FindWorkingArea(const CanvasState &state,
                                    int working_area_id);
+ExportArea *FindExportArea(CanvasState &state, int export_area_id);
+const ExportArea *FindExportArea(const CanvasState &state, int export_area_id);
 void SyncExportAreaFromWorkingArea(CanvasState &state, int working_area_id);
 
 } // namespace im2d
