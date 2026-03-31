@@ -1433,21 +1433,23 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
     const ImU32 active_border = selected ? selected_color : border_color;
     const float thickness = selected ? 3.0f : 2.0f;
 
+    constexpr float corner_radius = 0.0f;
     draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max, fill_color,
-                             4.0f);
-    draw_list->AddRect(screen_rect.Min, screen_rect.Max, active_border, 4.0f, 0,
-                       thickness);
+                             corner_radius);
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max, active_border,
+                       corner_radius, 0, thickness);
     draw_list->AddText(
         ImVec2(screen_rect.Min.x + 8.0f, screen_rect.Min.y + 8.0f),
         active_border, area.name.c_str());
 
+    constexpr float handle_radius = 2.0f;
     if (selected && HasWorkingAreaFlag(area.flags, WorkingAreaFlagResizable)) {
       const ImRect handle_rect(
           ImVec2(screen_rect.Max.x - options.resize_handle_size,
                  screen_rect.Max.y - options.resize_handle_size),
           screen_rect.Max);
       draw_list->AddRectFilled(handle_rect.Min, handle_rect.Max, active_border,
-                               2.0f);
+                               handle_radius);
     }
   }
 
