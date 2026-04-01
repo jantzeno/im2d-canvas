@@ -73,7 +73,6 @@ struct TransientCanvasState {
   int dragging_imported_artwork_id = 0;
   int resizing_imported_artwork_id = 0;
   ImVec2 imported_artwork_resize_initial_scale = ImVec2(1.0f, 1.0f);
-  int selected_working_area_id = 0;
   int dragging_working_area_id = 0;
   int resizing_working_area_id = 0;
   ImVec2 imported_artwork_drag_offset = ImVec2(0.0f, 0.0f);
@@ -112,7 +111,7 @@ void SelectImportedArtworkForCanvas(CanvasState &state,
   state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                    artwork_id, 0};
   ClearSelectedImportedElements(state);
-  transient_state->selected_working_area_id = 0;
+  state.selected_working_area_id = 0;
   ResetMarqueeInteractionState(transient_state);
 }
 
@@ -1439,12 +1438,14 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
 
   const ImU32 fill_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_fill);
-  const ImU32 border_color =
-      ImGui::ColorConvertFloat4ToU32(state.theme.working_area_border);
-  const ImU32 selected_color =
-      ImGui::ColorConvertFloat4ToU32(state.theme.working_area_selected);
   const ImU32 export_outline =
       ImGui::ColorConvertFloat4ToU32(state.theme.export_area_outline);
+  const ImU32 exclusion_fill =
+      ImGui::ColorConvertFloat4ToU32(state.theme.exclusion_area_fill);
+  const ImU32 exclusion_outline =
+      ImGui::ColorConvertFloat4ToU32(state.theme.exclusion_area_outline);
+  const ImU32 exclusion_selected =
+      ImGui::ColorConvertFloat4ToU32(state.theme.exclusion_area_selected);
 
   for (const WorkingArea &area : state.working_areas) {
     if (!area.visible) {
@@ -1454,7 +1455,8 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
     const ImRect screen_rect =
         WorkingAreaScreenRect(state, canvas_rect.Min, area);
     const bool selected = area.id == selected_working_area_id;
-    const ImU32 active_border = selected ? selected_color : border_color;
+    const ImU32 active_border = ImGui::ColorConvertFloat4ToU32(
+        selected ? area.selected_border_color : area.border_color);
     const float thickness = selected ? 3.0f : 2.0f;
 
     constexpr float corner_radius = 0.0f;
@@ -1489,6 +1491,25 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
             ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y)));
     draw_list->AddRect(screen_rect.Min, screen_rect.Max, export_outline, 0.0f,
                        0, 1.0f);
+  }
+
+  for (const ExclusionArea &area : state.exclusion_areas) {
+    if (!area.visible) {
+      continue;
+    }
+
+    const ImRect screen_rect(
+        WorldToScreen(state, canvas_rect.Min, area.origin),
+        WorldToScreen(
+            state, canvas_rect.Min,
+            ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y)));
+    if (!area.hide_fill) {
+      draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max, exclusion_fill,
+                               0.0f);
+    }
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max,
+                       area.selected ? exclusion_selected : exclusion_outline,
+                       0.0f, 0, area.selected ? 2.0f : 1.0f);
   }
 
   draw_list->PopClipRect();
@@ -1812,7 +1833,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                             io.MousePos);
       } else {
         ResetMarqueeInteractionState(&transient_state);
-        transient_state.selected_working_area_id = area_hit.id;
+        state.selected_working_area_id = area_hit.id;
         state.selected_imported_artwork_id = 0;
         ClearImportedDebugSelection(state);
         ClearSelectedImportedElements(state);
@@ -1838,7 +1859,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       } else {
         ResetMarqueeInteractionState(&transient_state);
         state.selected_imported_artwork_id = 0;
-        transient_state.selected_working_area_id = 0;
+        state.selected_working_area_id = 0;
         ClearImportedDebugSelection(state);
         ClearSelectedImportedElements(state);
       }
@@ -2008,8 +2029,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   }
 
   DrawGrid(draw_list, state, canvas_rect);
-  DrawWorkingAreas(draw_list, state, canvas_rect,
-                   transient_state.selected_working_area_id, options);
+  DrawWorkingAreas(draw_list, state, canvas_rect, state.selected_working_area_id,
+                   options);
   DrawImportedArtwork(draw_list, state, canvas_rect,
                       state.selected_imported_artwork_id, options);
   DrawSeparationPreviewOverlay(draw_list, state, canvas_rect);

@@ -73,6 +73,9 @@ struct CanvasTheme {
   ImVec4 working_area_border = ImVec4(0.58f, 0.74f, 0.58f, 1.0f);
   ImVec4 working_area_selected = ImVec4(0.97f, 0.82f, 0.36f, 1.0f);
   ImVec4 export_area_outline = ImVec4(0.43f, 0.77f, 0.92f, 0.65f);
+  ImVec4 exclusion_area_fill = ImVec4(0.88f, 0.33f, 0.24f, 0.18f);
+  ImVec4 exclusion_area_outline = ImVec4(0.95f, 0.47f, 0.35f, 0.92f);
+  ImVec4 exclusion_area_selected = ImVec4(1.0f, 0.62f, 0.48f, 1.0f);
   ImVec4 imported_issue_open_geometry = ImVec4(0.94f, 0.57f, 0.24f, 1.0f);
   ImVec4 imported_issue_ambiguous_cleanup = ImVec4(0.24f, 0.69f, 0.65f, 1.0f);
   ImVec4 imported_issue_orphan_hole = ImVec4(0.91f, 0.33f, 0.24f, 1.0f);
@@ -145,6 +148,8 @@ struct WorkingArea {
   ImVec2 origin = ImVec2(0.0f, 0.0f);
   ImVec2 size = ImVec2(0.0f, 0.0f);
   bool visible = true;
+  ImVec4 border_color = ImVec4(0.58f, 0.74f, 0.58f, 1.0f);
+  ImVec4 selected_border_color = ImVec4(0.97f, 0.82f, 0.36f, 1.0f);
   uint32_t flags = kDefaultWorkingAreaFlags;
 };
 
@@ -154,6 +159,16 @@ struct ExportArea {
   ImVec2 origin = ImVec2(0.0f, 0.0f);
   ImVec2 size = ImVec2(0.0f, 0.0f);
   bool visible = true;
+};
+
+struct ExclusionArea {
+  int id = 0;
+  int source_working_area_id = 0;
+  ImVec2 origin = ImVec2(0.0f, 0.0f);
+  ImVec2 size = ImVec2(0.0f, 0.0f);
+  bool visible = true;
+  bool selected = false;
+  bool hide_fill = false;
 };
 
 struct Layer {
@@ -490,9 +505,11 @@ struct CanvasState {
   std::vector<Guide> guides;
   std::vector<WorkingArea> working_areas;
   std::vector<ExportArea> export_areas;
+  std::vector<ExclusionArea> exclusion_areas;
   std::vector<Layer> layers;
   std::vector<ImportedArtwork> imported_artwork;
   bool show_imported_dxf_text = true;
+  int selected_working_area_id = 0;
   int selected_imported_artwork_id = 0;
   int selected_guide_id = 0;
   ImportedDebugSelection selected_imported_debug;
