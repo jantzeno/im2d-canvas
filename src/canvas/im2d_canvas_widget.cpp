@@ -212,21 +212,41 @@ PreviewOverlayColors MakePreviewOverlayColors(const ImVec4 &stroke,
   return {ThemeColorToU32(stroke), ThemeColorToU32(fill)};
 }
 
+bool ImportedIssueOverlayVisible(const ImportedIssueOverlaySettings &settings,
+                                 const uint32_t issue_flags) {
+  return (settings.show_ambiguous_cleanup &&
+          HasImportedElementIssueFlag(issue_flags,
+                                      ImportedElementIssueFlagAmbiguousCleanup)) ||
+         (settings.show_orphan_hole &&
+          HasImportedElementIssueFlag(issue_flags,
+                                      ImportedElementIssueFlagOrphanHole)) ||
+         (settings.show_placeholder_text &&
+          HasImportedElementIssueFlag(issue_flags,
+                                      ImportedElementIssueFlagPlaceholderText)) ||
+         (settings.show_open_geometry &&
+          HasImportedElementIssueFlag(issue_flags,
+                                      ImportedElementIssueFlagOpenGeometry));
+}
+
 ImU32 ImportedIssueOverlayColor(const CanvasTheme &theme,
+                                const ImportedIssueOverlaySettings &settings,
                                 const uint32_t issue_flags) {
-  if (HasImportedElementIssueFlag(issue_flags,
+  if (settings.show_ambiguous_cleanup &&
+      HasImportedElementIssueFlag(issue_flags,
                                   ImportedElementIssueFlagAmbiguousCleanup)) {
     return ThemeColorToU32(theme.imported_issue_ambiguous_cleanup);
   }
-  if (HasImportedElementIssueFlag(issue_flags,
+  if (settings.show_orphan_hole &&
+      HasImportedElementIssueFlag(issue_flags,
                                   ImportedElementIssueFlagOrphanHole)) {
     return ThemeColorToU32(theme.imported_issue_orphan_hole);
   }
-  if (HasImportedElementIssueFlag(issue_flags,
+  if (settings.show_placeholder_text &&
+      HasImportedElementIssueFlag(issue_flags,
                                   ImportedElementIssueFlagPlaceholderText)) {
     return ThemeColorToU32(theme.imported_issue_placeholder_text);
   }
-  return ThemeColorToU32(theme.imported_issue_default);
+  return ThemeColorToU32(theme.imported_issue_open_geometry);
 }
 
 PreviewOverlayColors GetSeparationPreviewColors(
@@ -1254,13 +1274,15 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
       }
       DrawImportedDxfText(draw_list, state, canvas_rect, artwork, text);
       if (show_issue_overlays &&
-          text.issue_flags != ImportedElementIssueFlagNone) {
+          ImportedIssueOverlayVisible(state.imported_issue_overlays,
+                                      text.issue_flags)) {
         const ImRect text_rect = ImportedElementScreenRect(
             state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
         draw_list->AddRect(
             text_rect.Min, text_rect.Max,
-            ImportedIssueOverlayColor(state.theme, text.issue_flags), 3.0f, 0,
-            2.0f);
+            ImportedIssueOverlayColor(state.theme, state.imported_issue_overlays,
+                                      text.issue_flags),
+            3.0f, 0, 2.0f);
       }
       if (show_issue_overlays &&
           IsLastOperationIssueElement(state, artwork.id,
@@ -1313,13 +1335,15 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
       }
 
       if (show_issue_overlays &&
-          path.issue_flags != ImportedElementIssueFlagNone) {
+          ImportedIssueOverlayVisible(state.imported_issue_overlays,
+                                      path.issue_flags)) {
         const ImRect path_rect = ImportedElementScreenRect(
             state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
         draw_list->AddRect(
             path_rect.Min, path_rect.Max,
-            ImportedIssueOverlayColor(state.theme, path.issue_flags), 3.0f, 0,
-            2.0f);
+            ImportedIssueOverlayColor(state.theme, state.imported_issue_overlays,
+                                      path.issue_flags),
+            3.0f, 0, 2.0f);
       }
       if (show_issue_overlays &&
           IsLastOperationIssueElement(state, artwork.id,

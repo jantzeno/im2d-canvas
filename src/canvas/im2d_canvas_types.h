@@ -73,10 +73,10 @@ struct CanvasTheme {
   ImVec4 working_area_border = ImVec4(0.58f, 0.74f, 0.58f, 1.0f);
   ImVec4 working_area_selected = ImVec4(0.97f, 0.82f, 0.36f, 1.0f);
   ImVec4 export_area_outline = ImVec4(0.43f, 0.77f, 0.92f, 0.65f);
+  ImVec4 imported_issue_open_geometry = ImVec4(0.94f, 0.57f, 0.24f, 1.0f);
   ImVec4 imported_issue_ambiguous_cleanup = ImVec4(0.24f, 0.69f, 0.65f, 1.0f);
   ImVec4 imported_issue_orphan_hole = ImVec4(0.91f, 0.33f, 0.24f, 1.0f);
   ImVec4 imported_issue_placeholder_text = ImVec4(0.91f, 0.67f, 0.24f, 1.0f);
-  ImVec4 imported_issue_default = ImVec4(0.94f, 0.57f, 0.24f, 1.0f);
   ImVec4 operation_issue = ImVec4(0.35f, 0.67f, 1.0f, 1.0f);
   ImVec4 preview_assigned_stroke = ImVec4(0.35f, 0.63f, 1.0f, 0.92f);
   ImVec4 preview_assigned_fill = ImVec4(0.35f, 0.63f, 1.0f, 0.20f);
@@ -472,12 +472,20 @@ struct ImportedArtwork {
   uint32_t flags = kDefaultImportedArtworkFlags;
 };
 
+struct ImportedIssueOverlaySettings {
+  bool show_open_geometry = true;
+  bool show_placeholder_text = true;
+  bool show_orphan_hole = true;
+  bool show_ambiguous_cleanup = true;
+};
+
 struct CanvasState {
   CanvasTheme theme;
   GridSettings grid;
   PhysicalCalibration calibration;
   ViewTransform view;
   SnapSettings snapping;
+  ImportedIssueOverlaySettings imported_issue_overlays;
   MeasurementUnit ruler_unit = MeasurementUnit::Millimeters;
   std::vector<Guide> guides;
   std::vector<WorkingArea> working_areas;
