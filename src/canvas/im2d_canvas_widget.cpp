@@ -1438,8 +1438,6 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
 
   const ImU32 fill_color =
       ImGui::ColorConvertFloat4ToU32(state.theme.working_area_fill);
-  const ImU32 export_outline =
-      ImGui::ColorConvertFloat4ToU32(state.theme.export_area_outline);
   const ImU32 exclusion_fill =
       ImGui::ColorConvertFloat4ToU32(state.theme.exclusion_area_fill);
   const ImU32 exclusion_outline =
@@ -1489,7 +1487,13 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
         WorldToScreen(
             state, canvas_rect.Min,
             ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y)));
-    draw_list->AddRect(screen_rect.Min, screen_rect.Max, export_outline, 0.0f,
+    if (!area.hide_fill) {
+      draw_list->AddRectFilled(
+          screen_rect.Min, screen_rect.Max,
+          ImGui::ColorConvertFloat4ToU32(area.fill_color), 0.0f);
+    }
+    draw_list->AddRect(screen_rect.Min, screen_rect.Max,
+                       ImGui::ColorConvertFloat4ToU32(area.outline_color), 0.0f,
                        0, 1.0f);
   }
 
@@ -1709,6 +1713,11 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   const ImRect canvas_rect(ImVec2(total_rect.Min.x + left_ruler_thickness,
                                   total_rect.Min.y + top_ruler_thickness),
                            total_rect.Max);
+  state.runtime.valid = true;
+  state.runtime.total_min = total_rect.Min;
+  state.runtime.total_max = total_rect.Max;
+  state.runtime.canvas_min = canvas_rect.Min;
+  state.runtime.canvas_max = canvas_rect.Max;
 
   ImDrawList *draw_list = ImGui::GetWindowDrawList();
   draw_list->AddRectFilled(

@@ -152,20 +152,6 @@ bool RectsIntersect(const WorldRect &a, const WorldRect &b) {
            a.min.y > b.max.y);
 }
 
-const ExportArea *FindExportArea(const CanvasState &state, int export_area_id) {
-  if (state.export_areas.empty()) {
-    return nullptr;
-  }
-  if (export_area_id == 0) {
-    return &state.export_areas.front();
-  }
-  auto it = std::find_if(state.export_areas.begin(), state.export_areas.end(),
-                         [export_area_id](const ExportArea &area) {
-                           return area.id == export_area_id;
-                         });
-  return it == state.export_areas.end() ? nullptr : &(*it);
-}
-
 constexpr float kSvgPreviewStrokeWidth = 1.0f;
 
 void AddWarning(SvgExportResult *result, std::string message) {

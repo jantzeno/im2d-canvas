@@ -106,6 +106,14 @@ struct CanvasTheme {
   ImVec4 preview_label_background = ImVec4(0.06f, 0.07f, 0.10f, 0.86f);
 };
 
+struct CanvasRuntimeInfo {
+  bool valid = false;
+  ImVec2 total_min = ImVec2(0.0f, 0.0f);
+  ImVec2 total_max = ImVec2(0.0f, 0.0f);
+  ImVec2 canvas_min = ImVec2(0.0f, 0.0f);
+  ImVec2 canvas_max = ImVec2(0.0f, 0.0f);
+};
+
 struct GridSettings {
   bool visible = true;
   float spacing = 10.0f;
@@ -159,6 +167,9 @@ struct ExportArea {
   ImVec2 origin = ImVec2(0.0f, 0.0f);
   ImVec2 size = ImVec2(0.0f, 0.0f);
   bool visible = true;
+  bool hide_fill = false;
+  ImVec4 outline_color = ImVec4(0.43f, 0.77f, 0.92f, 0.65f);
+  ImVec4 fill_color = ImVec4(0.43f, 0.77f, 0.92f, 0.18f);
 };
 
 struct ExclusionArea {
@@ -527,6 +538,7 @@ struct CanvasState {
   int next_layer_id = 1;
   int next_imported_artwork_id = 1;
   int next_imported_part_id = 1;
+  CanvasRuntimeInfo runtime;
 };
 
 struct CanvasWidgetOptions {
