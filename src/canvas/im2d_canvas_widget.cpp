@@ -21,6 +21,7 @@ constexpr float kImportedPreviewStrokeWidth = 1.0f;
 constexpr float kImportedPreviewCurveFlatnessPixels = 0.35f;
 constexpr int kImportedPreviewCurveMaxSubdivisionDepth = 10;
 constexpr float kMarqueeDragStartDistancePixels = 4.0f;
+constexpr float kRightDragStartDistancePixels = 4.0f;
 constexpr float kMarqueeOutlineThickness = 2.0f;
 constexpr float kMarqueeFillAlpha = 0.18f;
 
@@ -75,6 +76,8 @@ struct TransientCanvasState {
   ImVec2 imported_artwork_resize_initial_scale = ImVec2(1.0f, 1.0f);
   int dragging_working_area_id = 0;
   int resizing_working_area_id = 0;
+  bool right_mouse_pressed_in_canvas = false;
+  bool right_mouse_dragged = false;
   ImVec2 imported_artwork_drag_offset = ImVec2(0.0f, 0.0f);
   ImVec2 working_area_drag_offset = ImVec2(0.0f, 0.0f);
   ImVec2 marquee_press_screen = ImVec2(0.0f, 0.0f);
@@ -1760,9 +1763,17 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         io.MousePos.y - canvas_rect.Min.y - focus_world.y * state.view.zoom);
   }
 
-  if (canvas_hovered && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+  if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    transient_state.right_mouse_pressed_in_canvas = canvas_hovered;
+    transient_state.right_mouse_dragged = false;
+  }
+
+  if (transient_state.right_mouse_pressed_in_canvas &&
+      ImGui::IsMouseDragging(ImGuiMouseButton_Right,
+                             kRightDragStartDistancePixels)) {
     state.view.pan.x += io.MouseDelta.x;
     state.view.pan.y += io.MouseDelta.y;
+    transient_state.right_mouse_dragged = true;
   }
 
   if (!transient_state.creating_guide &&
@@ -2020,22 +2031,31 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   }
 
   if (imported_artwork_hit.id != 0 &&
-      ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+      ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+      !transient_state.right_mouse_dragged) {
     transient_state.context_imported_artwork_id = imported_artwork_hit.id;
     state.selected_imported_artwork_id = imported_artwork_hit.id;
     state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                      imported_artwork_hit.id, 0};
     ImGui::OpenPopup("imported_artwork_context_menu");
   } else if (hovered_guide_id != 0 &&
-             ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+             ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+             !transient_state.right_mouse_dragged) {
     transient_state.context_guide_id = hovered_guide_id;
     state.selected_guide_id = hovered_guide_id;
     ImGui::OpenPopup("guide_context_menu");
   } else if ((top_ruler_hovered || left_ruler_hovered) &&
-             ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+             ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+             !transient_state.right_mouse_dragged) {
     ImGui::OpenPopup("ruler_context_menu");
-  } else if (canvas_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  } else if (canvas_hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+             !transient_state.right_mouse_dragged) {
     ImGui::OpenPopup("canvas_context_menu");
+  }
+
+  if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) {
+    transient_state.right_mouse_pressed_in_canvas = false;
+    transient_state.right_mouse_dragged = false;
   }
 
   DrawGrid(draw_list, state, canvas_rect);

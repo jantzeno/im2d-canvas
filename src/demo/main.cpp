@@ -167,7 +167,7 @@ void DrawInspector(CanvasState &state) {
 
   ImGui::Separator();
   ImGui::TextUnformatted("Navigation");
-  ImGui::BulletText("Middle mouse: pan");
+  ImGui::BulletText("Right drag: pan");
   ImGui::BulletText("Mouse wheel: zoom");
   ImGui::BulletText("Left drag from rulers: create guides");
   ImGui::BulletText("Left drag guide: move guide");
