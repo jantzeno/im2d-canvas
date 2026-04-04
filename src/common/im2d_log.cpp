@@ -6,6 +6,8 @@
 namespace im2d::log {
 namespace {
 
+constexpr const char *kLoggerName = "canvas";
+
 std::shared_ptr<spdlog::logger> g_logger;
 
 } // namespace
@@ -15,8 +17,13 @@ void InitializeLogger() {
     return;
   }
 
-  g_logger = spdlog::stdout_color_mt("im2d");
-  g_logger->set_pattern("[%H:%M:%S] [%^%l%$] %v");
+  g_logger = spdlog::get(kLoggerName);
+  if (g_logger == nullptr) {
+    g_logger = spdlog::stdout_color_mt(kLoggerName);
+  }
+
+  g_logger->set_pattern("[%H:%M:%S] [%^%l%$] [" + std::string(kLoggerName) +
+                        "] %v");
 #ifdef NDEBUG
   g_logger->set_level(spdlog::level::info);
 #else
@@ -26,8 +33,13 @@ void InitializeLogger() {
 }
 
 void ShutdownLogger() {
+  if (g_logger == nullptr) {
+    spdlog::drop(kLoggerName);
+    return;
+  }
+
   g_logger.reset();
-  spdlog::shutdown();
+  spdlog::drop(kLoggerName);
 }
 
 std::shared_ptr<spdlog::logger> GetLogger() {
