@@ -150,6 +150,11 @@ struct Guide {
   bool locked = false;
 };
 
+struct Outlines {
+  float outline_thickness = 1.0f;
+  float selected_outline_thickness = 1.5f;
+};
+
 struct WorkingArea {
   int id = 0;
   std::string name;
@@ -158,6 +163,8 @@ struct WorkingArea {
   bool visible = true;
   ImVec4 border_color = ImVec4(0.58f, 0.74f, 0.58f, 1.0f);
   ImVec4 selected_border_color = ImVec4(0.97f, 0.82f, 0.36f, 1.0f);
+  float outline_thickness = Outlines().outline_thickness;
+  float selected_outline_thickness = Outlines().selected_outline_thickness;
   uint32_t flags = kDefaultWorkingAreaFlags;
 };
 
@@ -545,12 +552,15 @@ struct CanvasWidgetOptions {
   float ruler_thickness = 28.0f;
   float min_working_area_size = 16.0f;
   float resize_handle_size = 10.0f;
+  bool ensure_default_working_area = true;
   ImVec2 context_menu_padding = ImVec2(10.0f, 8.0f);
 };
 
 struct WorkingAreaCreateInfo {
   std::string name;
   ImVec2 size_pixels = ImVec2(0.0f, 0.0f);
+  float outline_thickness = Outlines().outline_thickness;
+  float selected_outline_thickness = Outlines().selected_outline_thickness;
   uint32_t flags = kDefaultWorkingAreaFlags;
 };
 

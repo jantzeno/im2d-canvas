@@ -214,14 +214,14 @@ PreviewOverlayColors MakePreviewOverlayColors(const ImVec4 &stroke,
 bool ImportedIssueOverlayVisible(const ImportedIssueOverlaySettings &settings,
                                  const uint32_t issue_flags) {
   return (settings.show_ambiguous_cleanup &&
-          HasImportedElementIssueFlag(issue_flags,
-                                      ImportedElementIssueFlagAmbiguousCleanup)) ||
+          HasImportedElementIssueFlag(
+              issue_flags, ImportedElementIssueFlagAmbiguousCleanup)) ||
          (settings.show_orphan_hole &&
           HasImportedElementIssueFlag(issue_flags,
                                       ImportedElementIssueFlagOrphanHole)) ||
          (settings.show_placeholder_text &&
-          HasImportedElementIssueFlag(issue_flags,
-                                      ImportedElementIssueFlagPlaceholderText)) ||
+          HasImportedElementIssueFlag(
+              issue_flags, ImportedElementIssueFlagPlaceholderText)) ||
          (settings.show_open_geometry &&
           HasImportedElementIssueFlag(issue_flags,
                                       ImportedElementIssueFlagOpenGeometry));
@@ -1279,8 +1279,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
             state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
         draw_list->AddRect(
             text_rect.Min, text_rect.Max,
-            ImportedIssueOverlayColor(state.theme, state.imported_issue_overlays,
-                                      text.issue_flags),
+            ImportedIssueOverlayColor(
+                state.theme, state.imported_issue_overlays, text.issue_flags),
             3.0f, 0, 2.0f);
       }
       if (show_issue_overlays &&
@@ -1340,8 +1340,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
             state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
         draw_list->AddRect(
             path_rect.Min, path_rect.Max,
-            ImportedIssueOverlayColor(state.theme, state.imported_issue_overlays,
-                                      path.issue_flags),
+            ImportedIssueOverlayColor(
+                state.theme, state.imported_issue_overlays, path.issue_flags),
             3.0f, 0, 2.0f);
       }
       if (show_issue_overlays &&
@@ -1455,7 +1455,8 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
     const bool selected = area.id == selected_working_area_id;
     const ImU32 active_border = ImGui::ColorConvertFloat4ToU32(
         selected ? area.selected_border_color : area.border_color);
-    const float thickness = selected ? 3.0f : 2.0f;
+    const float thickness =
+        selected ? area.selected_outline_thickness : area.outline_thickness;
 
     constexpr float corner_radius = 0.0f;
     draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max, fill_color,
@@ -1488,9 +1489,9 @@ void DrawWorkingAreas(ImDrawList *draw_list, const CanvasState &state,
             state, canvas_rect.Min,
             ImVec2(area.origin.x + area.size.x, area.origin.y + area.size.y)));
     if (!area.hide_fill) {
-      draw_list->AddRectFilled(
-          screen_rect.Min, screen_rect.Max,
-          ImGui::ColorConvertFloat4ToU32(area.fill_color), 0.0f);
+      draw_list->AddRectFilled(screen_rect.Min, screen_rect.Max,
+                               ImGui::ColorConvertFloat4ToU32(area.fill_color),
+                               0.0f);
     }
     draw_list->AddRect(screen_rect.Min, screen_rect.Max,
                        ImGui::ColorConvertFloat4ToU32(area.outline_color), 0.0f,
@@ -1674,7 +1675,7 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
 } // namespace
 
 bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
-  InitializeDefaultDocument(state);
+  InitializeDefaultDocument(state, options.ensure_default_working_area);
   TransientCanvasState &transient_state = GetTransientCanvasState();
   ImGuiIO &io = ImGui::GetIO();
 
@@ -2038,8 +2039,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   }
 
   DrawGrid(draw_list, state, canvas_rect);
-  DrawWorkingAreas(draw_list, state, canvas_rect, state.selected_working_area_id,
-                   options);
+  DrawWorkingAreas(draw_list, state, canvas_rect,
+                   state.selected_working_area_id, options);
   DrawImportedArtwork(draw_list, state, canvas_rect,
                       state.selected_imported_artwork_id, options);
   DrawSeparationPreviewOverlay(draw_list, state, canvas_rect);

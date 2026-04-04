@@ -521,6 +521,9 @@ int AddWorkingArea(CanvasState &state,
   area.size = ImVec2(std::max(create_info.size_pixels.x, 1.0f),
                      std::max(create_info.size_pixels.y, 1.0f));
   area.flags = create_info.flags;
+  area.outline_thickness = std::max(create_info.outline_thickness, 0.0f);
+  area.selected_outline_thickness =
+      std::max(create_info.selected_outline_thickness, 0.0f);
   const float stagger = 32.0f * static_cast<float>(state.working_areas.size());
   area.origin = ImVec2(stagger, stagger);
   state.working_areas.push_back(area);
@@ -667,12 +670,13 @@ void RecomputeImportedHierarchyBounds(ImportedArtwork &artwork) {
   }
 }
 
-void InitializeDefaultDocument(CanvasState &state) {
+void InitializeDefaultDocument(CanvasState &state,
+                               const bool ensure_default_working_area) {
   if (state.layers.empty()) {
     state.layers.push_back(Layer{state.next_layer_id++, "Root", true, false});
   }
 
-  if (state.working_areas.empty()) {
+  if (ensure_default_working_area && state.working_areas.empty()) {
     WorkingAreaCreateInfo create_info;
     create_info.name = "Working Area 1";
     create_info.size_pixels = ImVec2(

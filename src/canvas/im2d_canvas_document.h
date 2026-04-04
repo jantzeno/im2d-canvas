@@ -4,7 +4,8 @@
 
 namespace im2d {
 
-void InitializeDefaultDocument(CanvasState &state);
+void InitializeDefaultDocument(CanvasState &state,
+                               bool ensure_default_working_area = true);
 int AddWorkingArea(CanvasState &state,
                    const WorkingAreaCreateInfo &create_info);
 int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
