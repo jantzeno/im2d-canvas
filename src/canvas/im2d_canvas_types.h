@@ -150,6 +150,13 @@ struct Guide {
   bool locked = false;
 };
 
+struct RulerReference {
+  bool enabled = false;
+  ImVec2 origin_world = ImVec2(0.0f, 0.0f);
+  float horizontal_direction = 1.0f;
+  float vertical_direction = 1.0f;
+};
+
 struct Outlines {
   float outline_thickness = 1.0f;
   float selected_outline_thickness = 1.5f;
@@ -520,6 +527,7 @@ struct CanvasState {
   SnapSettings snapping;
   ImportedIssueOverlaySettings imported_issue_overlays;
   MeasurementUnit ruler_unit = MeasurementUnit::Millimeters;
+  RulerReference ruler_reference;
   std::vector<Guide> guides;
   std::vector<WorkingArea> working_areas;
   std::vector<ExportArea> export_areas;

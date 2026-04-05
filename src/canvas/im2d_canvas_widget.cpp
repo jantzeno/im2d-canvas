@@ -546,6 +546,35 @@ std::string FormatRulerTickLabel(float tick_units, float step_units) {
   return formatted;
 }
 
+float RulerDirection(const CanvasState &state, bool horizontal) {
+  const float direction =
+      horizontal ? state.ruler_reference.horizontal_direction
+                 : state.ruler_reference.vertical_direction;
+  return std::abs(direction) < 1e-6f ? 1.0f : direction;
+}
+
+float RulerOriginWorld(const CanvasState &state, bool horizontal) {
+  return horizontal ? state.ruler_reference.origin_world.x
+                    : state.ruler_reference.origin_world.y;
+}
+
+float TransformRulerWorld(const CanvasState &state, float world, bool horizontal) {
+  if (!state.ruler_reference.enabled) {
+    return world;
+  }
+  return (world - RulerOriginWorld(state, horizontal)) *
+         RulerDirection(state, horizontal);
+}
+
+float InverseTransformRulerWorld(const CanvasState &state, float world,
+                                 bool horizontal) {
+  if (!state.ruler_reference.enabled) {
+    return world;
+  }
+  return RulerOriginWorld(state, horizontal) +
+         (world / RulerDirection(state, horizontal));
+}
+
 float ComputeLeftRulerThickness(const CanvasState &state,
                                 const ImRect &total_rect,
                                 float top_ruler_thickness,
@@ -572,9 +601,11 @@ float ComputeLeftRulerThickness(const CanvasState &state,
           .y;
 
   const float min_units =
-      PixelsToUnits(visible_min_world, state.ruler_unit, state.calibration);
+      PixelsToUnits(TransformRulerWorld(state, visible_min_world, false),
+                    state.ruler_unit, state.calibration);
   const float max_units =
-      PixelsToUnits(visible_max_world, state.ruler_unit, state.calibration);
+      PixelsToUnits(TransformRulerWorld(state, visible_max_world, false),
+                    state.ruler_unit, state.calibration);
   const float start_units =
       std::floor(std::min(min_units, max_units) / minor_step_units) *
       minor_step_units;
@@ -1620,9 +1651,11 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
                        .y;
 
   const float min_units =
-      PixelsToUnits(visible_min_world, state.ruler_unit, state.calibration);
+      PixelsToUnits(TransformRulerWorld(state, visible_min_world, horizontal),
+                    state.ruler_unit, state.calibration);
   const float max_units =
-      PixelsToUnits(visible_max_world, state.ruler_unit, state.calibration);
+      PixelsToUnits(TransformRulerWorld(state, visible_max_world, horizontal),
+                    state.ruler_unit, state.calibration);
   const float start_units =
       std::floor(std::min(min_units, max_units) / minor_step_units) *
       minor_step_units;
@@ -1632,8 +1665,10 @@ void DrawRulerAxis(ImDrawList *draw_list, const CanvasState &state,
 
   for (float tick_units = start_units; tick_units <= end_units;
        tick_units += minor_step_units) {
-    const float tick_world =
+    const float display_tick_world =
         UnitsToPixels(tick_units, state.ruler_unit, state.calibration);
+    const float tick_world =
+        InverseTransformRulerWorld(state, display_tick_world, horizontal);
     const float remainder = std::fmod(std::fabs(tick_units), major_step_units);
     const bool major = remainder < 0.0001f ||
                        std::fabs(remainder - major_step_units) < 0.0001f;
