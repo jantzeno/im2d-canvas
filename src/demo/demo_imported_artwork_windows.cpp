@@ -655,29 +655,6 @@ bool IsSkippedImportedElement(const im2d::CanvasState &state, int artwork_id,
       });
 }
 
-bool HasExtractableImportedDebugSelection(
-    const im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
-  if (state.selected_imported_debug.artwork_id != artwork.id) {
-    return false;
-  }
-
-  switch (state.selected_imported_debug.kind) {
-  case im2d::ImportedDebugSelectionKind::Group:
-    return im2d::FindImportedGroup(
-               artwork, state.selected_imported_debug.item_id) != nullptr;
-  case im2d::ImportedDebugSelectionKind::Path:
-    return im2d::FindImportedPath(
-               artwork, state.selected_imported_debug.item_id) != nullptr;
-  case im2d::ImportedDebugSelectionKind::DxfText:
-    return im2d::FindImportedDxfText(
-               artwork, state.selected_imported_debug.item_id) != nullptr;
-  case im2d::ImportedDebugSelectionKind::Artwork:
-  case im2d::ImportedDebugSelectionKind::None:
-    return false;
-  }
-  return false;
-}
-
 const char *ExtractActionLabel(const im2d::CanvasState &state,
                                const im2d::ImportedArtwork &artwork) {
   if (!state.selected_imported_elements.empty() &&
@@ -699,52 +676,15 @@ const char *ExtractActionLabel(const im2d::CanvasState &state,
   return "Extract Selection";
 }
 
-bool HasGroupableImportedElementSelection(
-    const im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
-  return state.selected_imported_artwork_id == artwork.id &&
-         state.selected_imported_elements.size() >= 2;
-}
-
-bool HasGroupableImportedRootSelection(const im2d::CanvasState &state,
-                                       const im2d::ImportedArtwork &artwork) {
-  if (state.selected_imported_artwork_id != artwork.id ||
-      !state.selected_imported_elements.empty()) {
-    return false;
-  }
-
-  if (state.selected_imported_debug.artwork_id != artwork.id) {
-    return false;
-  }
-
-  const bool artwork_selected = state.selected_imported_debug.kind ==
-                                im2d::ImportedDebugSelectionKind::Artwork;
-  const bool root_group_selected =
-      state.selected_imported_debug.kind ==
-          im2d::ImportedDebugSelectionKind::Group &&
-      state.selected_imported_debug.item_id == artwork.root_group_id;
-  return (artwork_selected || root_group_selected) &&
-         CountGroupableImportedRootItems(artwork) >= 2;
-}
-
 const char *GroupActionLabel(const im2d::CanvasState &state,
                              const im2d::ImportedArtwork &artwork) {
-  if (HasGroupableImportedElementSelection(state, artwork)) {
+  if (im2d::HasGroupableImportedElementSelection(state, artwork)) {
     return "Group Selection";
   }
-  if (HasGroupableImportedRootSelection(state, artwork)) {
+  if (im2d::HasGroupableImportedRootSelection(state, artwork)) {
     return "Group Artwork Contents";
   }
   return "Group Selection";
-}
-
-bool HasUngroupableImportedDebugSelection(
-    const im2d::CanvasState &state, const im2d::ImportedArtwork &artwork) {
-  return state.selected_imported_debug.artwork_id == artwork.id &&
-         state.selected_imported_debug.kind ==
-             im2d::ImportedDebugSelectionKind::Group &&
-         state.selected_imported_debug.item_id != artwork.root_group_id &&
-         im2d::FindImportedGroup(
-             artwork, state.selected_imported_debug.item_id) != nullptr;
 }
 
 enum class ImportedDebugTreeActionKind {
@@ -825,10 +765,12 @@ bool ApplyImportedDebugTreeAction(im2d::CanvasState &state,
 bool DrawImportedGroupingControls(im2d::CanvasState &state,
                                   im2d::ImportedArtwork &artwork) {
   const bool can_group_selection =
-      HasGroupableImportedElementSelection(state, artwork);
-  const bool can_group_root = HasGroupableImportedRootSelection(state, artwork);
+      im2d::HasGroupableImportedElementSelection(state, artwork);
+  const bool can_group_root =
+      im2d::HasGroupableImportedRootSelection(state, artwork);
   const bool can_group = can_group_selection || can_group_root;
-  const bool can_ungroup = HasUngroupableImportedDebugSelection(state, artwork);
+  const bool can_ungroup =
+      im2d::HasUngroupableImportedDebugSelection(state, artwork);
 
   ImGui::Separator();
   ImGui::TextUnformatted("Grouping");
@@ -872,7 +814,7 @@ bool DrawDebugTreeExtractionControls(im2d::CanvasState &state,
       !state.selected_imported_elements.empty() &&
       state.selected_imported_artwork_id == artwork.id;
   const bool has_debug_target =
-      HasExtractableImportedDebugSelection(state, artwork);
+      im2d::HasExtractableImportedDebugSelection(state, artwork);
   const bool can_extract = has_selected_elements || has_debug_target;
 
   ImGui::Separator();
@@ -1294,7 +1236,7 @@ bool DrawImportedDebugTree(im2d::CanvasState &state,
     if (ImGui::MenuItem("Select Artwork")) {
       SelectImportedArtwork(state, artwork.id);
     }
-    if (HasGroupableImportedElementSelection(state, artwork) &&
+    if (im2d::HasGroupableImportedElementSelection(state, artwork) &&
         ImGui::MenuItem("Group Selection")) {
       QueueImportedDebugTreeAction(
           &pending_action, ImportedDebugTreeActionKind::GroupSelection,
@@ -1924,7 +1866,7 @@ bool DrawImportedArtworkWorkflowContents(im2d::CanvasState &state) {
       !state.selected_imported_elements.empty() &&
       state.selected_imported_artwork_id == artwork->id;
   const bool has_debug_target =
-      HasExtractableImportedDebugSelection(state, *artwork);
+      im2d::HasExtractableImportedDebugSelection(state, *artwork);
   if (!has_selected_elements && !has_debug_target) {
     ImGui::BeginDisabled();
   }

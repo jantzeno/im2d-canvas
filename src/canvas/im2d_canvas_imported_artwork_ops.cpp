@@ -91,6 +91,83 @@ void PopulateOperationReadiness(ImportedArtworkOperationResult *result,
   result->nest_ready = artwork.part.nest_ready;
 }
 
+ImportedTextContour *FindImportedTextContourByIndex(ImportedDxfText &text,
+                                                    int contour_index) {
+  int current_index = 0;
+  for (ImportedTextGlyph &glyph : text.glyphs) {
+    for (ImportedTextContour &contour : glyph.contours) {
+      if (contour.role == ImportedTextContourRole::Guide ||
+          contour.segments.empty()) {
+        continue;
+      }
+      if (current_index == contour_index) {
+        return &contour;
+      }
+      current_index += 1;
+    }
+  }
+  for (ImportedTextContour &contour : text.placeholder_contours) {
+    if (contour.role == ImportedTextContourRole::Guide ||
+        contour.segments.empty()) {
+      continue;
+    }
+    if (current_index == contour_index) {
+      return &contour;
+    }
+    current_index += 1;
+  }
+  return nullptr;
+}
+
+double ImportedPathSignedArea(const ImportedPath &path) {
+  if (!path.closed || path.segments.empty()) {
+    return 0.0;
+  }
+
+  const Clipper2Lib::PathD polygon =
+      detail::SampleImportedPathToClipperPath(path);
+  if (polygon.size() < 3) {
+    return 0.0;
+  }
+  return Clipper2Lib::Area(polygon);
+}
+
+void CollectImportedIssueElements(
+    const ImportedArtwork &artwork,
+    std::vector<ImportedElementSelection> *issue_elements) {
+  for (const ImportedPath &path : artwork.paths) {
+    if (HasImportedElementIssueFlag(path.issue_flags,
+                                    ImportedElementIssueFlagOpenGeometry) ||
+        HasImportedElementIssueFlag(path.issue_flags,
+                                    ImportedElementIssueFlagOrphanHole) ||
+        HasImportedElementIssueFlag(path.issue_flags,
+                                    ImportedElementIssueFlagAmbiguousCleanup)) {
+      issue_elements->push_back({ImportedElementKind::Path, path.id});
+    }
+  }
+  for (const ImportedDxfText &text : artwork.dxf_text) {
+    if (HasImportedElementIssueFlag(text.issue_flags,
+                                    ImportedElementIssueFlagOpenGeometry) ||
+        HasImportedElementIssueFlag(text.issue_flags,
+                                    ImportedElementIssueFlagOrphanHole) ||
+        HasImportedElementIssueFlag(text.issue_flags,
+                                    ImportedElementIssueFlagPlaceholderText)) {
+      issue_elements->push_back({ImportedElementKind::DxfText, text.id});
+    }
+  }
+}
+
+int CountGroupableImportedRootItems(const ImportedArtwork &artwork) {
+  const ImportedGroup *root = FindImportedGroup(artwork, artwork.root_group_id);
+  if (root == nullptr) {
+    return 0;
+  }
+
+  return static_cast<int>(root->child_group_ids.size()) +
+         static_cast<int>(root->path_ids.size()) +
+         static_cast<int>(root->dxf_text_ids.size());
+}
+
 bool SameImportedSourceReference(const ImportedSourceReference &a,
                                  const ImportedSourceReference &b) {
   return a.source_artwork_id == b.source_artwork_id && a.kind == b.kind &&
@@ -2443,6 +2520,179 @@ AutoCloseImportedArtworkToPolyline(CanvasState &state, int imported_artwork_id,
                                         std::move(unresolved_elements));
   SetLastImportedArtworkOperation(state, result);
   return result;
+}
+
+ImportedArtworkOperationResult
+JoinImportedArtworkOpenSegments(CanvasState &state, int imported_artwork_id,
+                                float weld_tolerance) {
+  ImportedArtworkOperationResult result = AutoCloseImportedArtworkToPolyline(
+      state, imported_artwork_id, weld_tolerance);
+  if (!result.success) {
+    return result;
+  }
+
+  result.message = "Join Open Segments: stitched " +
+                   std::to_string(result.stitched_count) + ", closed " +
+                   std::to_string(result.closed_count) + ", remaining open " +
+                   std::to_string(result.open_count) + ".";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+AnalyzeImportedArtworkContours(CanvasState &state, int imported_artwork_id) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  RefreshImportedArtworkPartMetadata(*artwork);
+  PopulateOperationReadiness(&result, *artwork);
+
+  std::vector<ImportedElementSelection> issue_elements;
+  CollectImportedIssueElements(*artwork, &issue_elements);
+  SetLastImportedOperationIssueElements(state, artwork->id,
+                                        std::move(issue_elements));
+
+  result.success = true;
+  result.message = "Analyze Contours: open " +
+                   std::to_string(result.open_count) + ", outer " +
+                   std::to_string(result.outer_count) + ", holes " +
+                   std::to_string(result.hole_count) + ", orphan holes " +
+                   std::to_string(result.orphan_hole_count) + ".";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+RepairImportedArtworkOrphanHoles(CanvasState &state, int imported_artwork_id) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  RefreshImportedArtworkPartMetadata(*artwork);
+
+  int repaired_hole_count = 0;
+  for (const ImportedContourReference &hole_ref : artwork->part.orphan_holes) {
+    if (hole_ref.kind == ImportedElementKind::Path) {
+      ImportedPath *path = FindImportedPath(*artwork, hole_ref.item_id);
+      if (path == nullptr || !path->closed || path->segments.empty()) {
+        continue;
+      }
+
+      path->flags &= ~static_cast<uint32_t>(ImportedPathFlagHoleContour);
+      if (ImportedPathSignedArea(*path) < 0.0) {
+        *path = ReverseImportedPathCopy(*path);
+      }
+      repaired_hole_count += 1;
+      continue;
+    }
+
+    ImportedDxfText *text = FindImportedDxfText(*artwork, hole_ref.item_id);
+    if (text == nullptr) {
+      continue;
+    }
+    ImportedTextContour *contour =
+        FindImportedTextContourByIndex(*text, hole_ref.contour_index);
+    if (contour == nullptr) {
+      continue;
+    }
+    contour->role = ImportedTextContourRole::Outline;
+    repaired_hole_count += 1;
+  }
+
+  RecomputeImportedArtworkBounds(*artwork);
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+  PopulateOperationReadiness(&result, *artwork);
+  result.repaired_hole_count = repaired_hole_count;
+
+  std::vector<ImportedElementSelection> issue_elements;
+  CollectImportedIssueElements(*artwork, &issue_elements);
+  SetLastImportedOperationIssueElements(state, artwork->id,
+                                        std::move(issue_elements));
+
+  result.success = repaired_hole_count > 0 || result.orphan_hole_count == 0;
+  result.message = "Repair Orphan Holes: reclassified " +
+                   std::to_string(result.repaired_hole_count) +
+                   " orphan contours, remaining orphan holes " +
+                   std::to_string(result.orphan_hole_count) + ".";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+bool HasExtractableImportedDebugSelection(const CanvasState &state,
+                                          const ImportedArtwork &artwork) {
+  if (state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  switch (state.selected_imported_debug.kind) {
+  case ImportedDebugSelectionKind::Group:
+    return state.selected_imported_debug.item_id != artwork.root_group_id &&
+           FindImportedGroup(artwork, state.selected_imported_debug.item_id) !=
+               nullptr;
+  case ImportedDebugSelectionKind::Path:
+    return FindImportedPath(artwork, state.selected_imported_debug.item_id) !=
+           nullptr;
+  case ImportedDebugSelectionKind::DxfText:
+    return FindImportedDxfText(
+               artwork, state.selected_imported_debug.item_id) != nullptr;
+  case ImportedDebugSelectionKind::Artwork:
+  case ImportedDebugSelectionKind::None:
+    return false;
+  }
+  return false;
+}
+
+bool HasGroupableImportedElementSelection(const CanvasState &state,
+                                          const ImportedArtwork &artwork) {
+  return state.selected_imported_artwork_id == artwork.id &&
+         state.selected_imported_elements.size() >= 2;
+}
+
+bool HasGroupableImportedRootSelection(const CanvasState &state,
+                                       const ImportedArtwork &artwork) {
+  if (state.selected_imported_artwork_id != artwork.id ||
+      !state.selected_imported_elements.empty()) {
+    return false;
+  }
+
+  if (state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  const bool artwork_selected =
+      state.selected_imported_debug.kind == ImportedDebugSelectionKind::Artwork;
+  const bool root_group_selected =
+      state.selected_imported_debug.kind == ImportedDebugSelectionKind::Group &&
+      state.selected_imported_debug.item_id == artwork.root_group_id;
+  return (artwork_selected || root_group_selected) &&
+         CountGroupableImportedRootItems(artwork) >= 2;
+}
+
+bool HasUngroupableImportedDebugSelection(const CanvasState &state,
+                                          const ImportedArtwork &artwork) {
+  return state.selected_imported_debug.artwork_id == artwork.id &&
+         state.selected_imported_debug.kind ==
+             ImportedDebugSelectionKind::Group &&
+         state.selected_imported_debug.item_id != artwork.root_group_id &&
+         FindImportedGroup(artwork, state.selected_imported_debug.item_id) !=
+             nullptr;
 }
 
 ImportedArtworkOperationResult PrepareImportedArtworkForCutting(

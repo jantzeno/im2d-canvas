@@ -359,6 +359,7 @@ struct ImportedArtworkOperationResult {
   int island_count = 0;
   int attached_hole_count = 0;
   int orphan_hole_count = 0;
+  int repaired_hole_count = 0;
   int closed_count = 0;
   int open_count = 0;
   int auto_close_endpoint_count = 0;

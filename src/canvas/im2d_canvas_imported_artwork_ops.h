@@ -14,6 +14,21 @@ bool RotateImportedArtworkClockwise(CanvasState &state,
 bool RotateImportedArtworkCounterClockwise(CanvasState &state,
                                            int imported_artwork_id);
 ImportedArtworkOperationResult
+JoinImportedArtworkOpenSegments(CanvasState &state, int imported_artwork_id,
+                                float weld_tolerance = 0.5f);
+ImportedArtworkOperationResult
+AnalyzeImportedArtworkContours(CanvasState &state, int imported_artwork_id);
+ImportedArtworkOperationResult
+RepairImportedArtworkOrphanHoles(CanvasState &state, int imported_artwork_id);
+bool HasExtractableImportedDebugSelection(const CanvasState &state,
+                                          const ImportedArtwork &artwork);
+bool HasGroupableImportedElementSelection(const CanvasState &state,
+                                          const ImportedArtwork &artwork);
+bool HasGroupableImportedRootSelection(const CanvasState &state,
+                                       const ImportedArtwork &artwork);
+bool HasUngroupableImportedDebugSelection(const CanvasState &state,
+                                          const ImportedArtwork &artwork);
+ImportedArtworkOperationResult
 AutoCloseImportedArtworkToPolyline(CanvasState &state, int imported_artwork_id,
                                    float weld_tolerance = 0.5f);
 ImportedArtworkOperationResult PrepareImportedArtworkForCutting(
