@@ -26,6 +26,10 @@ GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
 GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
+GroupSelectedImportedArtworkObjects(CanvasState &state);
+ImportedArtworkOperationResult
+UngroupSelectedImportedArtworkObjects(CanvasState &state);
+ImportedArtworkOperationResult
 UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
 PreviewSeparateImportedArtworkByGuide(CanvasState &state,

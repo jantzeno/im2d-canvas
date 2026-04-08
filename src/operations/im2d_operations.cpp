@@ -6,7 +6,6 @@
 #include "../canvas/im2d_canvas_imported_artwork_ops.h"
 
 #include <algorithm>
-#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -278,7 +277,7 @@ im2d::ImportedArtworkOperationResult MoveImportedElementsToNewArtwork(
   }
 
   im2d::ClearSelectedImportedElements(state);
-  state.selected_imported_artwork_id = created_artwork_id;
+  im2d::SetSingleSelectedImportedArtworkObject(state, created_artwork_id);
   state.selected_imported_debug = {im2d::ImportedDebugSelectionKind::Artwork,
                                    created_artwork_id, 0};
 
@@ -432,6 +431,16 @@ GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
 ImportedArtworkOperationResult
 GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id) {
   return im2d::GroupImportedArtworkRootContents(state, imported_artwork_id);
+}
+
+ImportedArtworkOperationResult
+GroupSelectedImportedArtworkObjects(CanvasState &state) {
+  return im2d::GroupSelectedImportedArtworkObjects(state);
+}
+
+ImportedArtworkOperationResult
+UngroupSelectedImportedArtworkObjects(CanvasState &state) {
+  return im2d::UngroupSelectedImportedArtworkObjects(state);
 }
 
 ImportedArtworkOperationResult

@@ -107,6 +107,19 @@ im2d::ImportedArtwork MakeArtworkWithNestedGroup() {
   return artwork;
 }
 
+im2d::ImportedArtwork MakeArtworkWithId(const int artwork_id,
+                                        const float x_offset = 0.0f) {
+  im2d::ImportedArtwork artwork = MakeArtworkWithRoot(
+      {MakeRectanglePath(1, x_offset, 0.0f, x_offset + 8.0f, 8.0f, false),
+       MakeRectanglePath(2, x_offset + 12.0f, 0.0f, x_offset + 18.0f, 6.0f,
+                         false)});
+  artwork.id = artwork_id;
+  artwork.name = "Artwork " + std::to_string(artwork_id);
+  artwork.part.part_id = artwork_id;
+  artwork.part.source_artwork_id = artwork_id;
+  return artwork;
+}
+
 im2d::CanvasState MakeCanvasState(im2d::ImportedArtwork artwork) {
   im2d::CanvasState state;
   state.imported_artwork.push_back(std::move(artwork));
@@ -152,6 +165,123 @@ TEST_CASE("Imported artwork selection helpers expose grouping and extraction "
       2,
   };
   REQUIRE(im2d::HasExtractableImportedDebugSelection(state, artwork));
+
+  state.imported_artwork.push_back(MakeArtworkWithId(2, 40.0f));
+  state.selected_imported_artwork_ids = {1, 2};
+  state.selection_scope = im2d::ImportedArtworkSelectionScope::Canvas;
+  REQUIRE(im2d::HasGroupableImportedArtworkSelection(state));
+}
+
+TEST_CASE("GroupSelectedImportedArtworkObjects merges selected artworks into "
+          "one grouped artwork",
+          "[canvas][imported]") {
+  im2d::CanvasState state;
+  state.imported_artwork.push_back(MakeArtworkWithId(1));
+  state.imported_artwork.push_back(MakeArtworkWithId(2, 40.0f));
+  state.next_imported_artwork_id = 3;
+  state.next_imported_part_id = 3;
+  state.selected_imported_artwork_id = 1;
+  state.selected_imported_artwork_ids = {1, 2};
+  state.selection_scope = im2d::ImportedArtworkSelectionScope::Canvas;
+  state.selected_imported_debug = {
+      im2d::ImportedDebugSelectionKind::Artwork,
+      1,
+      0,
+  };
+
+  const im2d::ImportedArtworkOperationResult result =
+      im2d::GroupSelectedImportedArtworkObjects(state);
+
+  REQUIRE(result.success);
+  REQUIRE(result.selected_count == 2);
+  REQUIRE(state.imported_artwork.size() == 1);
+  REQUIRE(state.selected_imported_artwork_id == result.created_artwork_id);
+  REQUIRE(state.selected_imported_artwork_ids ==
+          std::vector<int>{result.created_artwork_id});
+
+  const im2d::ImportedArtwork &grouped_artwork = state.imported_artwork.front();
+  REQUIRE(grouped_artwork.groups.size() == 3);
+  const im2d::ImportedGroup *root_group =
+      im2d::FindImportedGroup(grouped_artwork, grouped_artwork.root_group_id);
+  REQUIRE(root_group != nullptr);
+  REQUIRE(root_group->child_group_ids.size() == 2);
+  REQUIRE(grouped_artwork.part.contributing_source_artwork_ids.size() == 2);
+}
+
+TEST_CASE("UngroupSelectedImportedArtworkObjects restores grouped artworks to "
+          "multiple selected objects",
+          "[canvas][imported]") {
+  im2d::CanvasState state;
+  state.imported_artwork.push_back(MakeArtworkWithId(1));
+  state.imported_artwork.push_back(MakeArtworkWithId(2, 40.0f));
+  state.next_imported_artwork_id = 3;
+  state.next_imported_part_id = 3;
+  state.selected_imported_artwork_id = 1;
+  state.selected_imported_artwork_ids = {1, 2};
+  state.selection_scope = im2d::ImportedArtworkSelectionScope::Canvas;
+  state.selected_imported_debug = {
+      im2d::ImportedDebugSelectionKind::Artwork,
+      1,
+      0,
+  };
+
+  const im2d::ImportedArtworkOperationResult group_result =
+      im2d::GroupSelectedImportedArtworkObjects(state);
+  REQUIRE(group_result.success);
+  REQUIRE(state.imported_artwork.size() == 1);
+  REQUIRE(state.selected_imported_artwork_id ==
+          group_result.created_artwork_id);
+
+  const im2d::ImportedArtwork &grouped_artwork = state.imported_artwork.front();
+  REQUIRE(im2d::HasUngroupableImportedArtworkSelection(state, grouped_artwork));
+
+  const im2d::ImportedArtworkOperationResult ungroup_result =
+      im2d::UngroupSelectedImportedArtworkObjects(state);
+
+  REQUIRE(ungroup_result.success);
+  REQUIRE(state.imported_artwork.size() == 2);
+  REQUIRE(state.selected_imported_artwork_ids.size() == 2);
+  REQUIRE(state.selected_imported_debug.kind ==
+          im2d::ImportedDebugSelectionKind::Artwork);
+}
+
+TEST_CASE("UngroupSelectedImportedArtworkObjects unwraps grouped artwork root "
+          "contents when the artwork is selected",
+          "[canvas][imported]") {
+  im2d::CanvasState state = MakeCanvasState(MakeArtworkWithId(1));
+  state.selected_imported_debug = {
+      im2d::ImportedDebugSelectionKind::Artwork,
+      state.selected_imported_artwork_id,
+      0,
+  };
+
+  const im2d::ImportedArtworkOperationResult group_result =
+      im2d::GroupImportedArtworkRootContents(
+          state, state.selected_imported_artwork_id);
+  REQUIRE(group_result.success);
+  REQUIRE(state.imported_artwork.size() == 1);
+
+  state.selected_imported_debug = {
+      im2d::ImportedDebugSelectionKind::Artwork,
+      state.selected_imported_artwork_id,
+      0,
+  };
+  REQUIRE(im2d::HasUngroupableImportedArtworkSelection(
+      state, state.imported_artwork.front()));
+
+  const im2d::ImportedArtworkOperationResult ungroup_result =
+      im2d::UngroupSelectedImportedArtworkObjects(state);
+
+  REQUIRE(ungroup_result.success);
+  REQUIRE(state.imported_artwork.size() == 1);
+  const im2d::ImportedArtwork &artwork = state.imported_artwork.front();
+  const im2d::ImportedGroup *root_group =
+      im2d::FindImportedGroup(artwork, artwork.root_group_id);
+  REQUIRE(root_group != nullptr);
+  REQUIRE(root_group->child_group_ids.empty());
+  REQUIRE(root_group->path_ids.size() == 2);
+  REQUIRE(state.selected_imported_debug.kind ==
+          im2d::ImportedDebugSelectionKind::Artwork);
 }
 
 TEST_CASE("RepairImportedArtworkOrphanHoles resolves orphan contours by "
@@ -176,4 +306,107 @@ TEST_CASE("RepairImportedArtworkOrphanHoles resolves orphan contours by "
   REQUIRE(state.imported_artwork.front().part.orphan_hole_count == 0);
   REQUIRE(state.imported_artwork.front().part.outer_contour_count == 2);
   REQUIRE(state.imported_artwork.front().part.hole_contour_count == 0);
+}
+
+TEST_CASE("ApplyImportedArtworkSelectionScope collapses object scope to one "
+          "artwork and removes non-path element selections",
+          "[canvas][imported]") {
+  im2d::CanvasState state;
+  state.imported_artwork.push_back(MakeArtworkWithId(1));
+  state.imported_artwork.push_back(MakeArtworkWithId(2, 40.0f));
+  state.selected_imported_artwork_id = 2;
+  state.selected_imported_artwork_ids = {1, 2};
+  state.selected_imported_elements = {
+      {im2d::ImportedElementKind::DxfText, 9},
+      {im2d::ImportedElementKind::Path, 2},
+  };
+  state.selected_imported_debug = {
+      im2d::ImportedDebugSelectionKind::DxfText,
+      2,
+      9,
+  };
+
+  im2d::ApplyImportedArtworkSelectionScope(
+      state, im2d::ImportedArtworkSelectionScope::Object);
+
+  REQUIRE(state.selection_scope == im2d::ImportedArtworkSelectionScope::Object);
+  REQUIRE(state.selected_imported_artwork_id == 2);
+  REQUIRE(state.selected_imported_artwork_ids == std::vector<int>{2});
+  REQUIRE(state.selected_imported_elements.size() == 1);
+  REQUIRE(state.selected_imported_elements.front().kind ==
+          im2d::ImportedElementKind::Path);
+  REQUIRE(state.selected_imported_debug.kind ==
+          im2d::ImportedDebugSelectionKind::Path);
+  REQUIRE(state.selected_imported_debug.item_id == 2);
+
+  im2d::ApplyImportedArtworkSelectionScope(
+      state, im2d::ImportedArtworkSelectionScope::Canvas);
+
+  REQUIRE(state.selection_scope == im2d::ImportedArtworkSelectionScope::Canvas);
+  REQUIRE(state.selected_imported_elements.empty());
+  REQUIRE(state.selected_imported_artwork_ids == std::vector<int>{2});
+}
+
+TEST_CASE("ResolveImportedArtworkOperationTargets follows selection scope",
+          "[canvas][imported]") {
+  im2d::CanvasState state;
+  state.imported_artwork.push_back(MakeArtworkWithId(1));
+  state.imported_artwork.push_back(MakeArtworkWithId(2, 40.0f));
+  state.selected_imported_artwork_id = 2;
+  state.selected_imported_artwork_ids = {1, 2};
+  state.selection_scope = im2d::ImportedArtworkSelectionScope::Canvas;
+
+  REQUIRE(im2d::ResolveImportedArtworkOperationTargets(state) ==
+          std::vector<int>({1, 2}));
+
+  im2d::ApplyImportedArtworkSelectionScope(
+      state, im2d::ImportedArtworkSelectionScope::Object);
+
+  REQUIRE(im2d::ResolveImportedArtworkOperationTargets(state) ==
+          std::vector<int>({2}));
+}
+
+TEST_CASE("ApplyImportedArtworkOperationToSelection aggregates partial batch "
+          "results",
+          "[canvas][imported]") {
+  im2d::CanvasState state;
+  state.imported_artwork.push_back(MakeArtworkWithId(1));
+  state.imported_artwork.push_back(MakeArtworkWithId(2, 40.0f));
+  state.selected_imported_artwork_id = 1;
+  state.selected_imported_artwork_ids = {1, 2};
+  state.selection_scope = im2d::ImportedArtworkSelectionScope::Canvas;
+
+  const im2d::ImportedArtworkOperationResult result =
+      im2d::ApplyImportedArtworkOperationToSelection(
+          state, state.selected_imported_artwork_id, "Test Batch",
+          [](im2d::CanvasState &, const int artwork_id) {
+            im2d::ImportedArtworkOperationResult item_result;
+            item_result.artwork_id = artwork_id;
+            item_result.success = artwork_id == 1;
+            item_result.message = artwork_id == 1 ? "ok" : "failed";
+            return item_result;
+          });
+
+  REQUIRE_FALSE(result.success);
+  REQUIRE(result.selected_count == 2);
+  REQUIRE(result.message.find("completed for 1 of 2") != std::string::npos);
+  REQUIRE(result.message.find("Artwork 2: failed") != std::string::npos);
+}
+
+TEST_CASE("SelectImportedPathsInWorldRect only selects enclosed paths",
+          "[canvas][imported]") {
+  im2d::CanvasState state = MakeCanvasState(MakeArtworkWithId(1));
+
+  const im2d::ImportedArtworkOperationResult result =
+      im2d::SelectImportedPathsInWorldRect(
+          state, state.selected_imported_artwork_id, ImVec2(-1.0f, -1.0f),
+          ImVec2(9.0f, 9.0f), im2d::ImportedArtworkEditMode::SelectRectangle);
+
+  REQUIRE(result.success);
+  REQUIRE(result.selected_count == 1);
+  REQUIRE(state.selected_imported_elements.size() == 1);
+  REQUIRE(state.selected_imported_elements.front().kind ==
+          im2d::ImportedElementKind::Path);
+  REQUIRE(state.selected_imported_debug.kind ==
+          im2d::ImportedDebugSelectionKind::Path);
 }

@@ -265,6 +265,11 @@ enum class ImportedArtworkEditMode {
   SelectOval,
 };
 
+enum class ImportedArtworkSelectionScope {
+  Canvas,
+  Object,
+};
+
 struct ImportedElementSelection {
   ImportedElementKind kind = ImportedElementKind::Path;
   int item_id = 0;
@@ -538,8 +543,11 @@ struct CanvasState {
   bool show_imported_dxf_text = true;
   int selected_working_area_id = 0;
   int selected_imported_artwork_id = 0;
+  std::vector<int> selected_imported_artwork_ids;
   int selected_guide_id = 0;
   ImportedDebugSelection selected_imported_debug;
+  ImportedArtworkSelectionScope selection_scope =
+      ImportedArtworkSelectionScope::Canvas;
   ImportedArtworkEditMode imported_artwork_edit_mode =
       ImportedArtworkEditMode::None;
   std::vector<ImportedElementSelection> selected_imported_elements;

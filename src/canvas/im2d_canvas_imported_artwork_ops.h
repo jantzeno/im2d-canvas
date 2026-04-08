@@ -2,11 +2,20 @@
 
 #include "im2d_canvas_types.h"
 
+#include <functional>
+
 namespace im2d {
 
 bool IsImportedArtworkScaleRatioLocked(const ImportedArtwork &artwork);
 void UpdateImportedArtworkScaleFromTarget(ImportedArtwork &artwork,
                                           const ImVec2 &target_scale);
+std::vector<int>
+ResolveImportedArtworkOperationTargets(const CanvasState &state,
+                                       int fallback_artwork_id = 0);
+ImportedArtworkOperationResult ApplyImportedArtworkOperationToSelection(
+    CanvasState &state, int fallback_artwork_id, const char *operation_name,
+    const std::function<ImportedArtworkOperationResult(CanvasState &, int)>
+        &operation);
 bool FlipImportedArtworkHorizontal(CanvasState &state, int imported_artwork_id);
 bool FlipImportedArtworkVertical(CanvasState &state, int imported_artwork_id);
 bool RotateImportedArtworkClockwise(CanvasState &state,
@@ -26,6 +35,9 @@ bool HasGroupableImportedElementSelection(const CanvasState &state,
                                           const ImportedArtwork &artwork);
 bool HasGroupableImportedRootSelection(const CanvasState &state,
                                        const ImportedArtwork &artwork);
+bool HasGroupableImportedArtworkSelection(const CanvasState &state);
+bool HasUngroupableImportedArtworkSelection(const CanvasState &state,
+                                            const ImportedArtwork &artwork);
 bool HasUngroupableImportedDebugSelection(const CanvasState &state,
                                           const ImportedArtwork &artwork);
 ImportedArtworkOperationResult
@@ -36,6 +48,9 @@ ImportedArtworkOperationResult PrepareImportedArtworkForCutting(
     ImportedArtworkPrepareMode mode = ImportedArtworkPrepareMode::FidelityFirst,
     bool auto_close_to_polyline = false);
 ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
+    CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
+    const ImVec2 &world_end, ImportedArtworkEditMode mode);
+ImportedArtworkOperationResult SelectImportedPathsInWorldRect(
     CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
     const ImVec2 &world_end, ImportedArtworkEditMode mode);
 ImportedArtworkOperationResult
@@ -57,6 +72,10 @@ ImportedArtworkOperationResult
 GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
 GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id);
+ImportedArtworkOperationResult
+GroupSelectedImportedArtworkObjects(CanvasState &state);
+ImportedArtworkOperationResult
+UngroupSelectedImportedArtworkObjects(CanvasState &state);
 ImportedArtworkOperationResult
 UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult

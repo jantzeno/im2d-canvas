@@ -55,6 +55,9 @@ void SetLastImportedOperationIssueElements(
   state.last_imported_operation_issue_elements = std::move(issue_elements);
 }
 
+void RemoveImportedGroupReference(std::vector<int> *group_ids, int group_id);
+void PruneEmptyGroups(ImportedArtwork &artwork);
+
 void ClearImportedArtworkSeparationPreviewState(CanvasState &state) {
   state.imported_artwork_separation_preview = {};
 }
@@ -73,6 +76,146 @@ void ClearImportedArtworkPreviewStatesForArtwork(CanvasState &state,
       state.imported_artwork_auto_cut_preview.artwork_id == artwork_id) {
     ClearImportedArtworkAutoCutPreviewState(state);
   }
+}
+
+std::string
+ImportedArtworkOperationTargetLabel(const ImportedArtwork *artwork) {
+  if (artwork == nullptr) {
+    return "Artwork";
+  }
+  if (!artwork->name.empty()) {
+    return artwork->name;
+  }
+  return "Artwork " + std::to_string(artwork->id);
+}
+
+void AccumulateImportedArtworkOperationResult(
+    ImportedArtworkOperationResult *aggregate,
+    const ImportedArtworkOperationResult &result) {
+  aggregate->selected_count += result.selected_count;
+  aggregate->moved_count += result.moved_count;
+  aggregate->skipped_count += result.skipped_count;
+  aggregate->preserved_count += result.preserved_count;
+  aggregate->stitched_count += result.stitched_count;
+  aggregate->cleaned_count += result.cleaned_count;
+  aggregate->ambiguous_count += result.ambiguous_count;
+  aggregate->placeholder_count += result.placeholder_count;
+  aggregate->outer_count += result.outer_count;
+  aggregate->hole_count += result.hole_count;
+  aggregate->island_count += result.island_count;
+  aggregate->attached_hole_count += result.attached_hole_count;
+  aggregate->orphan_hole_count += result.orphan_hole_count;
+  aggregate->repaired_hole_count += result.repaired_hole_count;
+  aggregate->closed_count += result.closed_count;
+  aggregate->open_count += result.open_count;
+  aggregate->auto_close_endpoint_count += result.auto_close_endpoint_count;
+  aggregate->auto_close_cluster_count += result.auto_close_cluster_count;
+  aggregate->auto_close_group_count += result.auto_close_group_count;
+  aggregate->auto_close_component_count += result.auto_close_component_count;
+  aggregate->auto_close_pass_count += result.auto_close_pass_count;
+  aggregate->auto_close_elapsed_ms += result.auto_close_elapsed_ms;
+  aggregate->cut_ready = aggregate->cut_ready && result.cut_ready;
+  aggregate->nest_ready = aggregate->nest_ready && result.nest_ready;
+  if (result.created_artwork_id != 0) {
+    aggregate->created_artwork_id = result.created_artwork_id;
+  }
+}
+
+void SyncImportedArtworkSourceMetadata(ImportedArtwork *artwork) {
+  if (artwork == nullptr) {
+    return;
+  }
+
+  std::vector<int> source_artwork_ids;
+  const auto include_source_artwork_id =
+      [&source_artwork_ids](const int source_artwork_id) {
+        if (source_artwork_id == 0 ||
+            std::find(source_artwork_ids.begin(), source_artwork_ids.end(),
+                      source_artwork_id) != source_artwork_ids.end()) {
+          return;
+        }
+        source_artwork_ids.push_back(source_artwork_id);
+      };
+
+  for (const ImportedPath &path : artwork->paths) {
+    for (const ImportedSourceReference &reference : path.provenance) {
+      include_source_artwork_id(reference.source_artwork_id);
+    }
+  }
+  for (const ImportedDxfText &text : artwork->dxf_text) {
+    for (const ImportedSourceReference &reference : text.provenance) {
+      include_source_artwork_id(reference.source_artwork_id);
+    }
+  }
+
+  if (source_artwork_ids.empty() && artwork->part.source_artwork_id != 0) {
+    source_artwork_ids.push_back(artwork->part.source_artwork_id);
+  }
+
+  if (!source_artwork_ids.empty()) {
+    artwork->part.source_artwork_id = source_artwork_ids.front();
+    artwork->part.contributing_source_artwork_ids =
+        std::move(source_artwork_ids);
+  }
+}
+
+bool UngroupImportedGroupInPlace(ImportedArtwork *artwork, int group_id) {
+  if (artwork == nullptr) {
+    return false;
+  }
+
+  ImportedGroup *group = FindImportedGroup(*artwork, group_id);
+  if (group == nullptr || group->id == artwork->root_group_id ||
+      group->parent_group_id == 0) {
+    return false;
+  }
+
+  const int parent_group_id = group->parent_group_id;
+  const std::vector<int> child_group_ids = group->child_group_ids;
+  const std::vector<int> path_ids = group->path_ids;
+  const std::vector<int> text_ids = group->dxf_text_ids;
+
+  ImportedGroup *parent_group = FindImportedGroup(*artwork, parent_group_id);
+  if (parent_group == nullptr) {
+    return false;
+  }
+
+  RemoveImportedGroupReference(&parent_group->child_group_ids, group_id);
+  parent_group->child_group_ids.insert(parent_group->child_group_ids.end(),
+                                       child_group_ids.begin(),
+                                       child_group_ids.end());
+  parent_group->path_ids.insert(parent_group->path_ids.end(), path_ids.begin(),
+                                path_ids.end());
+  parent_group->dxf_text_ids.insert(parent_group->dxf_text_ids.end(),
+                                    text_ids.begin(), text_ids.end());
+
+  for (ImportedGroup &child_group : artwork->groups) {
+    if (std::find(child_group_ids.begin(), child_group_ids.end(),
+                  child_group.id) != child_group_ids.end()) {
+      child_group.parent_group_id = parent_group_id;
+    }
+  }
+  for (ImportedPath &path : artwork->paths) {
+    if (std::find(path_ids.begin(), path_ids.end(), path.id) !=
+        path_ids.end()) {
+      path.parent_group_id = parent_group_id;
+    }
+  }
+  for (ImportedDxfText &text : artwork->dxf_text) {
+    if (std::find(text_ids.begin(), text_ids.end(), text.id) !=
+        text_ids.end()) {
+      text.parent_group_id = parent_group_id;
+    }
+  }
+
+  std::erase_if(artwork->groups, [group_id](const ImportedGroup &candidate) {
+    return candidate.id == group_id;
+  });
+  PruneEmptyGroups(*artwork);
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+  SyncImportedArtworkSourceMetadata(artwork);
+  return true;
 }
 
 void PopulateOperationReadiness(ImportedArtworkOperationResult *result,
@@ -281,6 +424,223 @@ void PruneEmptyGroups(ImportedArtwork &artwork) {
   }
   FilterGroupReferences(artwork, retained_path_ids, retained_text_ids,
                         retained_group_ids);
+}
+
+void TranslateImportedPathToWorld(const ImportedArtwork &source,
+                                  ImportedPath *path) {
+  if (path == nullptr) {
+    return;
+  }
+
+  for (ImportedPathSegment &segment : path->segments) {
+    segment.start = ImportedArtworkPointToWorld(source, segment.start);
+    if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+      segment.control1 = ImportedArtworkPointToWorld(source, segment.control1);
+      segment.control2 = ImportedArtworkPointToWorld(source, segment.control2);
+    }
+    segment.end = ImportedArtworkPointToWorld(source, segment.end);
+  }
+}
+
+void TranslateImportedDxfTextToWorld(const ImportedArtwork &source,
+                                     ImportedDxfText *text) {
+  if (text == nullptr) {
+    return;
+  }
+
+  text->anchor_point = ImportedArtworkPointToWorld(source, text->anchor_point);
+  for (ImportedTextGlyph &glyph : text->glyphs) {
+    for (ImportedTextContour &contour : glyph.contours) {
+      for (ImportedPathSegment &segment : contour.segments) {
+        segment.start = ImportedArtworkPointToWorld(source, segment.start);
+        if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+          segment.control1 =
+              ImportedArtworkPointToWorld(source, segment.control1);
+          segment.control2 =
+              ImportedArtworkPointToWorld(source, segment.control2);
+        }
+        segment.end = ImportedArtworkPointToWorld(source, segment.end);
+      }
+    }
+  }
+
+  for (ImportedTextContour &contour : text->placeholder_contours) {
+    for (ImportedPathSegment &segment : contour.segments) {
+      segment.start = ImportedArtworkPointToWorld(source, segment.start);
+      if (segment.kind == ImportedPathSegmentKind::CubicBezier) {
+        segment.control1 =
+            ImportedArtworkPointToWorld(source, segment.control1);
+        segment.control2 =
+            ImportedArtworkPointToWorld(source, segment.control2);
+      }
+      segment.end = ImportedArtworkPointToWorld(source, segment.end);
+    }
+  }
+}
+
+ImportedArtwork BuildArtworkGroupFromSelection(
+    const std::vector<const ImportedArtwork *> &source_artworks) {
+  ImportedArtwork grouped_artwork;
+  grouped_artwork.name = source_artworks.front()->name.empty()
+                             ? "Grouped Artwork"
+                             : source_artworks.front()->name + " Group";
+  grouped_artwork.source_path = source_artworks.front()->source_path;
+  grouped_artwork.source_format = source_artworks.front()->source_format;
+  grouped_artwork.origin = ImVec2(0.0f, 0.0f);
+  grouped_artwork.scale = ImVec2(1.0f, 1.0f);
+  grouped_artwork.part.source_artwork_id =
+      source_artworks.front()->part.source_artwork_id;
+  grouped_artwork.root_group_id = 1;
+  grouped_artwork.next_group_id = 2;
+  grouped_artwork.next_path_id = 1;
+  grouped_artwork.next_dxf_text_id = 1;
+  grouped_artwork.visible = true;
+  grouped_artwork.flags = source_artworks.front()->flags;
+
+  ImportedGroup root_group;
+  root_group.id = grouped_artwork.root_group_id;
+  root_group.label = "Root";
+
+  bool has_world_bounds = false;
+  ImVec2 grouped_world_min(0.0f, 0.0f);
+  ImVec2 grouped_world_max(0.0f, 0.0f);
+  const auto include_world_bounds = [&](const ImportedArtwork &artwork) {
+    ImVec2 world_min;
+    ImVec2 world_max;
+    ImportedLocalBoundsToWorldBounds(artwork, artwork.bounds_min,
+                                     artwork.bounds_max, &world_min,
+                                     &world_max);
+    if (!has_world_bounds) {
+      grouped_world_min = world_min;
+      grouped_world_max = world_max;
+      has_world_bounds = true;
+      return;
+    }
+
+    grouped_world_min.x = std::min(grouped_world_min.x, world_min.x);
+    grouped_world_min.y = std::min(grouped_world_min.y, world_min.y);
+    grouped_world_max.x = std::max(grouped_world_max.x, world_max.x);
+    grouped_world_max.y = std::max(grouped_world_max.y, world_max.y);
+  };
+
+  for (const ImportedArtwork *source_artwork : source_artworks) {
+    if (source_artwork == nullptr) {
+      continue;
+    }
+
+    if (std::find(grouped_artwork.part.contributing_source_artwork_ids.begin(),
+                  grouped_artwork.part.contributing_source_artwork_ids.end(),
+                  source_artwork->part.source_artwork_id) ==
+        grouped_artwork.part.contributing_source_artwork_ids.end()) {
+      grouped_artwork.part.contributing_source_artwork_ids.push_back(
+          source_artwork->part.source_artwork_id);
+    }
+
+    include_world_bounds(*source_artwork);
+
+    const ImportedGroup *source_root =
+        FindImportedGroup(*source_artwork, source_artwork->root_group_id);
+    if (source_root == nullptr) {
+      continue;
+    }
+
+    ImportedGroup artwork_group;
+    artwork_group.id = grouped_artwork.next_group_id++;
+    artwork_group.parent_group_id = grouped_artwork.root_group_id;
+    artwork_group.label = source_artwork->name.empty()
+                              ? "Artwork " + std::to_string(source_artwork->id)
+                              : source_artwork->name;
+    artwork_group.source_id = source_artwork->source_path;
+    root_group.child_group_ids.push_back(artwork_group.id);
+
+    std::unordered_map<int, int> group_id_map;
+    group_id_map[source_artwork->root_group_id] = artwork_group.id;
+    for (const ImportedGroup &group : source_artwork->groups) {
+      if (group.id == source_artwork->root_group_id) {
+        continue;
+      }
+      group_id_map[group.id] = grouped_artwork.next_group_id++;
+    }
+
+    std::unordered_map<int, int> path_id_map;
+    for (const ImportedPath &path : source_artwork->paths) {
+      path_id_map[path.id] = grouped_artwork.next_path_id++;
+    }
+
+    std::unordered_map<int, int> text_id_map;
+    for (const ImportedDxfText &text : source_artwork->dxf_text) {
+      text_id_map[text.id] = grouped_artwork.next_dxf_text_id++;
+    }
+
+    for (const int child_group_id : source_root->child_group_ids) {
+      artwork_group.child_group_ids.push_back(group_id_map.at(child_group_id));
+    }
+    for (const int path_id : source_root->path_ids) {
+      artwork_group.path_ids.push_back(path_id_map.at(path_id));
+    }
+    for (const int text_id : source_root->dxf_text_ids) {
+      artwork_group.dxf_text_ids.push_back(text_id_map.at(text_id));
+    }
+    grouped_artwork.groups.push_back(std::move(artwork_group));
+
+    for (const ImportedGroup &group : source_artwork->groups) {
+      if (group.id == source_artwork->root_group_id) {
+        continue;
+      }
+
+      ImportedGroup clone = group;
+      clone.id = group_id_map.at(group.id);
+      clone.parent_group_id = group_id_map.at(group.parent_group_id);
+      clone.child_group_ids.clear();
+      for (const int child_group_id : group.child_group_ids) {
+        clone.child_group_ids.push_back(group_id_map.at(child_group_id));
+      }
+      clone.path_ids.clear();
+      for (const int path_id : group.path_ids) {
+        clone.path_ids.push_back(path_id_map.at(path_id));
+      }
+      clone.dxf_text_ids.clear();
+      for (const int text_id : group.dxf_text_ids) {
+        clone.dxf_text_ids.push_back(text_id_map.at(text_id));
+      }
+      grouped_artwork.groups.push_back(std::move(clone));
+    }
+
+    for (const ImportedPath &path : source_artwork->paths) {
+      ImportedPath clone = path;
+      clone.id = path_id_map.at(path.id);
+      clone.parent_group_id = group_id_map.at(path.parent_group_id);
+      if (clone.provenance.empty()) {
+        clone.provenance.push_back({source_artwork->part.source_artwork_id,
+                                    ImportedElementKind::Path, path.id});
+      }
+      TranslateImportedPathToWorld(*source_artwork, &clone);
+      grouped_artwork.paths.push_back(std::move(clone));
+    }
+
+    for (const ImportedDxfText &text : source_artwork->dxf_text) {
+      ImportedDxfText clone = text;
+      clone.id = text_id_map.at(text.id);
+      clone.parent_group_id = group_id_map.at(text.parent_group_id);
+      if (clone.provenance.empty()) {
+        clone.provenance.push_back({source_artwork->part.source_artwork_id,
+                                    ImportedElementKind::DxfText, text.id});
+      }
+      TranslateImportedDxfTextToWorld(*source_artwork, &clone);
+      grouped_artwork.dxf_text.push_back(std::move(clone));
+    }
+  }
+
+  grouped_artwork.groups.insert(grouped_artwork.groups.begin(),
+                                std::move(root_group));
+  RecomputeImportedArtworkBounds(grouped_artwork);
+  RecomputeImportedHierarchyBounds(grouped_artwork);
+  RefreshImportedArtworkPartMetadata(grouped_artwork);
+  SyncImportedArtworkSourceMetadata(&grouped_artwork);
+  if (has_world_bounds) {
+    grouped_artwork.origin = grouped_world_min;
+  }
+  return grouped_artwork;
 }
 
 ImportedArtwork BuildArtworkSubset(const ImportedArtwork &source,
@@ -2222,7 +2582,7 @@ MoveImportedElementsToNewArtwork(CanvasState &state, int imported_artwork_id,
   }
 
   ClearSelectedImportedElements(state);
-  state.selected_imported_artwork_id = created_artwork_id;
+  SetSingleSelectedImportedArtworkObject(state, created_artwork_id);
   state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                    created_artwork_id, 0};
 
@@ -2359,7 +2719,7 @@ MoveImportedElementsToNewArtworks(CanvasState &state, int imported_artwork_id,
   }
 
   ClearSelectedImportedElements(state);
-  state.selected_imported_artwork_id = created_artwork_id;
+  SetSingleSelectedImportedArtworkObject(state, created_artwork_id);
   state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                    created_artwork_id, 0};
 
@@ -2429,6 +2789,91 @@ void UpdateImportedArtworkScaleFromTarget(ImportedArtwork &artwork,
                                           const ImVec2 &target_scale) {
   operations::detail::UpdateImportedArtworkScaleFromTargetShared(artwork,
                                                                  target_scale);
+}
+
+std::vector<int>
+ResolveImportedArtworkOperationTargets(const CanvasState &state,
+                                       const int fallback_artwork_id) {
+  if (state.selection_scope == ImportedArtworkSelectionScope::Canvas) {
+    std::vector<int> selected_artwork_ids =
+        GetSelectedImportedArtworkObjects(state);
+    if (!selected_artwork_ids.empty()) {
+      return selected_artwork_ids;
+    }
+  }
+
+  if (fallback_artwork_id != 0) {
+    return {fallback_artwork_id};
+  }
+  if (state.selected_imported_artwork_id != 0) {
+    return {state.selected_imported_artwork_id};
+  }
+  return {};
+}
+
+ImportedArtworkOperationResult ApplyImportedArtworkOperationToSelection(
+    CanvasState &state, const int fallback_artwork_id,
+    const char *operation_name,
+    const std::function<ImportedArtworkOperationResult(CanvasState &, int)>
+        &operation) {
+  const std::vector<int> target_artwork_ids =
+      ResolveImportedArtworkOperationTargets(state, fallback_artwork_id);
+  if (target_artwork_ids.empty()) {
+    ImportedArtworkOperationResult result;
+    result.message = "Select one or more imported artworks.";
+    state.last_imported_operation_issue_artwork_id = 0;
+    state.last_imported_operation_issue_elements.clear();
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  if (target_artwork_ids.size() == 1) {
+    return operation(state, target_artwork_ids.front());
+  }
+
+  ImportedArtworkOperationResult aggregate;
+  aggregate.cut_ready = true;
+  aggregate.nest_ready = true;
+
+  int success_count = 0;
+  std::vector<std::string> failure_messages;
+  failure_messages.reserve(target_artwork_ids.size());
+  for (const int artwork_id : target_artwork_ids) {
+    const ImportedArtworkOperationResult result = operation(state, artwork_id);
+    aggregate.artwork_id = artwork_id;
+    AccumulateImportedArtworkOperationResult(&aggregate, result);
+    if (result.success) {
+      success_count += 1;
+      continue;
+    }
+
+    const ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id);
+    failure_messages.push_back(ImportedArtworkOperationTargetLabel(artwork) +
+                               ": " + result.message);
+  }
+
+  aggregate.success = failure_messages.empty();
+  aggregate.selected_count = static_cast<int>(target_artwork_ids.size());
+  aggregate.artwork_id = fallback_artwork_id;
+  aggregate.message =
+      std::string(operation_name) + ": completed for " +
+      std::to_string(success_count) + " of " +
+      std::to_string(target_artwork_ids.size()) + " selected artwork" +
+      (target_artwork_ids.size() == 1 ? std::string() : std::string("s")) + ".";
+  if (!failure_messages.empty()) {
+    aggregate.message += " Failures: ";
+    for (size_t index = 0; index < failure_messages.size(); ++index) {
+      if (index != 0) {
+        aggregate.message += " | ";
+      }
+      aggregate.message += failure_messages[index];
+    }
+  }
+
+  state.last_imported_operation_issue_artwork_id = 0;
+  state.last_imported_operation_issue_elements.clear();
+  SetLastImportedArtworkOperation(state, aggregate);
+  return aggregate;
 }
 
 bool FlipImportedArtworkHorizontal(CanvasState &state,
@@ -2683,6 +3128,40 @@ bool HasGroupableImportedRootSelection(const CanvasState &state,
       state.selected_imported_debug.item_id == artwork.root_group_id;
   return (artwork_selected || root_group_selected) &&
          CountGroupableImportedRootItems(artwork) >= 2;
+}
+
+bool HasGroupableImportedArtworkSelection(const CanvasState &state) {
+  return CountSelectedImportedArtworkObjects(state) >= 2;
+}
+
+bool HasSingleWrappedTopLevelImportedGroup(const ImportedArtwork &artwork) {
+  const ImportedGroup *root_group =
+      FindImportedGroup(artwork, artwork.root_group_id);
+  return root_group != nullptr && root_group->child_group_ids.size() == 1 &&
+         root_group->path_ids.empty() && root_group->dxf_text_ids.empty();
+}
+
+bool HasUngroupableImportedArtworkSelection(const CanvasState &state,
+                                            const ImportedArtwork &artwork) {
+  if (CountSelectedImportedArtworkObjects(state) != 1 ||
+      state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  const bool artwork_selected =
+      state.selected_imported_debug.kind == ImportedDebugSelectionKind::Artwork;
+  const bool root_group_selected =
+      state.selected_imported_debug.kind == ImportedDebugSelectionKind::Group &&
+      state.selected_imported_debug.item_id == artwork.root_group_id;
+  if (!artwork_selected && !root_group_selected) {
+    return false;
+  }
+
+  const ImportedGroup *root_group =
+      FindImportedGroup(artwork, artwork.root_group_id);
+  return (root_group != nullptr && !root_group->child_group_ids.empty() &&
+          artwork.part.contributing_source_artwork_ids.size() >= 2) ||
+         HasSingleWrappedTopLevelImportedGroup(artwork);
 }
 
 bool HasUngroupableImportedDebugSelection(const CanvasState &state,
@@ -2992,6 +3471,81 @@ ImportedArtworkOperationResult SelectImportedElementsInWorldRect(
   return result;
 }
 
+ImportedArtworkOperationResult SelectImportedPathsInWorldRect(
+    CanvasState &state, int imported_artwork_id, const ImVec2 &world_start,
+    const ImVec2 &world_end, ImportedArtworkEditMode mode) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+  if (mode == ImportedArtworkEditMode::None) {
+    result.message = "Imported artwork selection mode is not active.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  const detail::SelectionRect selection_rect =
+      detail::NormalizeRect(world_start, world_end);
+  ClearSelectedImportedElements(state);
+  std::vector<ImportedElementSelection> skipped_elements;
+
+  std::vector<ImVec2> sample_points;
+  for (const ImportedPath &path : artwork->paths) {
+    sample_points.clear();
+    detail::AppendPathSamplePointsWorld(*artwork, path, &sample_points);
+    if (sample_points.empty()) {
+      continue;
+    }
+
+    int inside_count = 0;
+    for (const ImVec2 &point : sample_points) {
+      inside_count +=
+          detail::PointInsideSelection(selection_rect, mode, point) ? 1 : 0;
+    }
+    if (inside_count == static_cast<int>(sample_points.size())) {
+      state.selected_imported_elements.push_back(
+          {ImportedElementKind::Path, path.id});
+    } else if (inside_count != 0) {
+      result.skipped_count += 1;
+      skipped_elements.push_back({ImportedElementKind::Path, path.id});
+    }
+  }
+
+  result.selected_count =
+      static_cast<int>(state.selected_imported_elements.size());
+  result.success = result.selected_count > 0;
+  SetSingleSelectedImportedArtworkObject(state, artwork->id);
+  PopulateOperationReadiness(&result, *artwork);
+  result.message =
+      "Selected " + std::to_string(result.selected_count) +
+      " enclosed imported path" +
+      (result.selected_count == 1 ? std::string() : std::string("s")) + ".";
+  if (result.skipped_count > 0) {
+    result.message +=
+        " Skipped " + std::to_string(result.skipped_count) + " crossing path" +
+        (result.skipped_count == 1 ? std::string() : std::string("s")) + ".";
+  }
+  if (!state.selected_imported_elements.empty()) {
+    state.selected_imported_debug = {
+        ImportedDebugSelectionKind::Path, artwork->id,
+        state.selected_imported_elements.front().item_id};
+  } else {
+    state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                     artwork->id, 0};
+  }
+  SetLastImportedOperationIssueElements(state, artwork->id,
+                                        std::move(skipped_elements));
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
 ImportedArtworkOperationResult
 PreviewSeparateImportedArtworkByGuide(CanvasState &state,
                                       int imported_artwork_id, int guide_id) {
@@ -3282,7 +3836,7 @@ GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
   RecomputeImportedHierarchyBounds(*artwork);
   RefreshImportedArtworkPartMetadata(*artwork);
   ClearSelectedImportedElements(state);
-  state.selected_imported_artwork_id = imported_artwork_id;
+  SetSingleSelectedImportedArtworkObject(state, imported_artwork_id);
   state.selected_imported_debug = {ImportedDebugSelectionKind::Group,
                                    imported_artwork_id,
                                    artwork->groups.back().id};
@@ -3353,7 +3907,7 @@ GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id) {
   RecomputeImportedHierarchyBounds(*artwork);
   RefreshImportedArtworkPartMetadata(*artwork);
   ClearSelectedImportedElements(state);
-  state.selected_imported_artwork_id = imported_artwork_id;
+  SetSingleSelectedImportedArtworkObject(state, imported_artwork_id);
   state.selected_imported_debug = {ImportedDebugSelectionKind::Group,
                                    imported_artwork_id,
                                    artwork->groups.back().id};
@@ -3366,6 +3920,221 @@ GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id) {
       " root imported item" +
       (result.selected_count == 1 ? std::string() : std::string("s")) +
       " into a new top-level group.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+GroupSelectedImportedArtworkObjects(CanvasState &state) {
+  ImportedArtworkOperationResult result;
+
+  const std::vector<int> target_artwork_ids =
+      GetSelectedImportedArtworkObjects(state);
+  result.selected_count = static_cast<int>(target_artwork_ids.size());
+  if (result.selected_count <= 1) {
+    result.message = "Grouping needs at least two selected imported objects.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  std::vector<const ImportedArtwork *> source_artworks;
+  source_artworks.reserve(target_artwork_ids.size());
+  for (const int artwork_id : target_artwork_ids) {
+    const ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id);
+    if (artwork == nullptr) {
+      result.message = "Imported artwork was not found.";
+      SetLastImportedOperationIssueElements(state, 0, {});
+      SetLastImportedArtworkOperation(state, result);
+      return result;
+    }
+    source_artworks.push_back(artwork);
+  }
+
+  SetLastImportedOperationIssueElements(state, 0, {});
+  ImportedArtwork grouped_artwork =
+      BuildArtworkGroupFromSelection(source_artworks);
+  const int created_artwork_id =
+      AppendImportedArtwork(state, std::move(grouped_artwork), false);
+  for (const int artwork_id : target_artwork_ids) {
+    DeleteImportedArtwork(state, artwork_id);
+  }
+
+  ClearSelectedImportedElements(state);
+  SetSingleSelectedImportedArtworkObject(state, created_artwork_id);
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                   created_artwork_id, 0};
+
+  result.success = true;
+  result.artwork_id = created_artwork_id;
+  result.created_artwork_id = created_artwork_id;
+  if (const ImportedArtwork *grouped =
+          FindImportedArtwork(state, created_artwork_id);
+      grouped != nullptr) {
+    PopulateOperationReadiness(&result, *grouped);
+  }
+  result.message =
+      "Grouped " + std::to_string(result.selected_count) + " imported object" +
+      (result.selected_count == 1 ? std::string() : std::string("s")) +
+      " into a new artwork.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+UngroupSelectedImportedArtworkObjects(CanvasState &state) {
+  ImportedArtworkOperationResult result;
+
+  if (CountSelectedImportedArtworkObjects(state) != 1 ||
+      state.selected_imported_artwork_id == 0) {
+    result.message = "Select a grouped imported object to ungroup it.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  const int imported_artwork_id = state.selected_imported_artwork_id;
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+  if (!HasUngroupableImportedArtworkSelection(state, *artwork)) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Select a grouped imported object to ungroup it.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  const ImportedGroup *root_group =
+      FindImportedGroup(*artwork, artwork->root_group_id);
+  if (root_group == nullptr) {
+    result.message = "Imported artwork root group was not found.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  if (HasSingleWrappedTopLevelImportedGroup(*artwork)) {
+    const int wrapped_group_id = root_group->child_group_ids.front();
+
+    ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+    SetLastImportedOperationIssueElements(state, 0, {});
+    if (!UngroupImportedGroupInPlace(artwork, wrapped_group_id)) {
+      result.message = "Grouped imported artwork could not be ungrouped.";
+      SetLastImportedArtworkOperation(state, result);
+      return result;
+    }
+
+    ClearSelectedImportedElements(state);
+    SetSingleSelectedImportedArtworkObject(state, imported_artwork_id);
+    state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                     imported_artwork_id, 0};
+
+    result.success = true;
+    result.artwork_id = imported_artwork_id;
+    result.created_artwork_id = imported_artwork_id;
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "Ungrouped artwork contents.";
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  struct ArtworkSplitBucket {
+    std::unordered_set<int> path_ids;
+    std::unordered_set<int> text_ids;
+    std::string label;
+    int wrapper_group_id = 0;
+  };
+
+  std::vector<ArtworkSplitBucket> buckets;
+  buckets.reserve(root_group->child_group_ids.size() + 1);
+  for (const int child_group_id : root_group->child_group_ids) {
+    const ImportedGroup *child_group =
+        FindImportedGroup(*artwork, child_group_id);
+    if (child_group == nullptr) {
+      continue;
+    }
+
+    ArtworkSplitBucket bucket;
+    bucket.label = child_group->label;
+    bucket.wrapper_group_id = child_group_id;
+    std::unordered_set<int> visited_group_ids;
+    operations::detail::CollectImportedGroupElementIdsShared(
+        *artwork, child_group_id, &bucket.path_ids, &bucket.text_ids,
+        &visited_group_ids);
+    if (!bucket.path_ids.empty() || !bucket.text_ids.empty()) {
+      buckets.push_back(std::move(bucket));
+    }
+  }
+
+  if (!root_group->path_ids.empty() || !root_group->dxf_text_ids.empty()) {
+    ArtworkSplitBucket root_bucket;
+    root_bucket.label = artwork->name;
+    root_bucket.path_ids.insert(root_group->path_ids.begin(),
+                                root_group->path_ids.end());
+    root_bucket.text_ids.insert(root_group->dxf_text_ids.begin(),
+                                root_group->dxf_text_ids.end());
+    buckets.push_back(std::move(root_bucket));
+  }
+
+  result.selected_count = static_cast<int>(buckets.size());
+  if (result.selected_count <= 1) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message =
+        "Grouped imported object does not contain multiple child objects.";
+    SetLastImportedOperationIssueElements(state, 0, {});
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  SetLastImportedOperationIssueElements(state, 0, {});
+
+  std::vector<int> created_artwork_ids;
+  created_artwork_ids.reserve(buckets.size());
+  for (const ArtworkSplitBucket &bucket : buckets) {
+    ImportedArtwork subset =
+        BuildArtworkSubset(*artwork, bucket.path_ids, bucket.text_ids, "");
+    if (!bucket.label.empty()) {
+      subset.name = bucket.label;
+    }
+    if (bucket.wrapper_group_id != 0) {
+      UngroupImportedGroupInPlace(&subset, bucket.wrapper_group_id);
+    }
+    SyncImportedArtworkSourceMetadata(&subset);
+
+    const int created_artwork_id =
+        AppendImportedArtwork(state, std::move(subset), false);
+    if (created_artwork_id != 0) {
+      created_artwork_ids.push_back(created_artwork_id);
+    }
+  }
+
+  DeleteImportedArtwork(state, imported_artwork_id);
+  ClearSelectedImportedElements(state);
+  state.selected_imported_artwork_ids = created_artwork_ids;
+  state.selected_imported_artwork_id =
+      created_artwork_ids.empty() ? 0 : created_artwork_ids.front();
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                   state.selected_imported_artwork_id, 0};
+
+  result.success = !created_artwork_ids.empty();
+  result.artwork_id = state.selected_imported_artwork_id;
+  result.created_artwork_id = state.selected_imported_artwork_id;
+  if (const ImportedArtwork *created_artwork =
+          FindImportedArtwork(state, state.selected_imported_artwork_id);
+      created_artwork != nullptr) {
+    PopulateOperationReadiness(&result, *created_artwork);
+  }
+  result.message =
+      "Ungrouped imported object into " +
+      std::to_string(created_artwork_ids.size()) + " imported object" +
+      (created_artwork_ids.size() == 1 ? std::string() : std::string("s")) +
+      ".";
   SetLastImportedArtworkOperation(state, result);
   return result;
 }
@@ -3405,58 +4174,20 @@ UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id) {
 
   const int group_id = group->id;
   const int parent_group_id = group->parent_group_id;
-  const std::vector<int> child_group_ids = group->child_group_ids;
-  const std::vector<int> path_ids = group->path_ids;
-  const std::vector<int> text_ids = group->dxf_text_ids;
+  const int ungrouped_item_count =
+      static_cast<int>(group->path_ids.size() + group->dxf_text_ids.size());
 
-  ImportedGroup *parent_group = FindImportedGroup(*artwork, parent_group_id);
-  if (parent_group == nullptr) {
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  SetLastImportedOperationIssueElements(state, 0, {});
+  if (!UngroupImportedGroupInPlace(artwork, group_id)) {
     result.message = "Imported group could not be ungrouped because its parent "
                      "was not found.";
     SetLastImportedOperationIssueElements(state, 0, {});
     SetLastImportedArtworkOperation(state, result);
     return result;
   }
-
-  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
-  SetLastImportedOperationIssueElements(state, 0, {});
-
-  RemoveImportedGroupReference(&parent_group->child_group_ids, group_id);
-  parent_group->child_group_ids.insert(parent_group->child_group_ids.end(),
-                                       child_group_ids.begin(),
-                                       child_group_ids.end());
-  parent_group->path_ids.insert(parent_group->path_ids.end(), path_ids.begin(),
-                                path_ids.end());
-  parent_group->dxf_text_ids.insert(parent_group->dxf_text_ids.end(),
-                                    text_ids.begin(), text_ids.end());
-
-  for (ImportedGroup &child_group : artwork->groups) {
-    if (std::find(child_group_ids.begin(), child_group_ids.end(),
-                  child_group.id) != child_group_ids.end()) {
-      child_group.parent_group_id = parent_group_id;
-    }
-  }
-  for (ImportedPath &path : artwork->paths) {
-    if (std::find(path_ids.begin(), path_ids.end(), path.id) !=
-        path_ids.end()) {
-      path.parent_group_id = parent_group_id;
-    }
-  }
-  for (ImportedDxfText &text : artwork->dxf_text) {
-    if (std::find(text_ids.begin(), text_ids.end(), text.id) !=
-        text_ids.end()) {
-      text.parent_group_id = parent_group_id;
-    }
-  }
-
-  std::erase_if(artwork->groups, [group_id](const ImportedGroup &candidate) {
-    return candidate.id == group_id;
-  });
-  PruneEmptyGroups(*artwork);
-  RecomputeImportedHierarchyBounds(*artwork);
-  RefreshImportedArtworkPartMetadata(*artwork);
   ClearSelectedImportedElements(state);
-  state.selected_imported_artwork_id = imported_artwork_id;
+  SetSingleSelectedImportedArtworkObject(state, imported_artwork_id);
   if (parent_group_id == artwork->root_group_id) {
     state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                      imported_artwork_id, 0};
@@ -3466,7 +4197,7 @@ UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id) {
   }
 
   result.success = true;
-  result.selected_count = static_cast<int>(path_ids.size() + text_ids.size());
+  result.selected_count = ungrouped_item_count;
   PopulateOperationReadiness(&result, *artwork);
   result.message = "Ungrouped imported group " + std::to_string(group_id) + ".";
   SetLastImportedArtworkOperation(state, result);

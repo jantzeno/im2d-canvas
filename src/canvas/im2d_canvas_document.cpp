@@ -366,8 +366,144 @@ void ClearImportedDebugSelection(CanvasState &state) {
   state.selected_imported_debug = {};
 }
 
+void ClearSelectedImportedArtworkObjects(CanvasState &state) {
+  state.selected_imported_artwork_id = 0;
+  state.selected_imported_artwork_ids.clear();
+}
+
 void ClearSelectedImportedElements(CanvasState &state) {
   state.selected_imported_elements.clear();
+}
+
+int CountSelectedImportedArtworkObjects(const CanvasState &state) {
+  if (!state.selected_imported_artwork_ids.empty()) {
+    return static_cast<int>(state.selected_imported_artwork_ids.size());
+  }
+  return state.selected_imported_artwork_id == 0 ? 0 : 1;
+}
+
+std::vector<int> GetSelectedImportedArtworkObjects(const CanvasState &state) {
+  if (!state.selected_imported_artwork_ids.empty()) {
+    return state.selected_imported_artwork_ids;
+  }
+
+  if (state.selected_imported_artwork_id == 0) {
+    return {};
+  }
+
+  return {state.selected_imported_artwork_id};
+}
+
+bool IsImportedArtworkObjectSelected(const CanvasState &state,
+                                     const int imported_artwork_id) {
+  if (imported_artwork_id == 0) {
+    return false;
+  }
+
+  if (state.selected_imported_artwork_ids.empty()) {
+    return state.selected_imported_artwork_id == imported_artwork_id;
+  }
+
+  return std::find(state.selected_imported_artwork_ids.begin(),
+                   state.selected_imported_artwork_ids.end(),
+                   imported_artwork_id) !=
+         state.selected_imported_artwork_ids.end();
+}
+
+void SetSingleSelectedImportedArtworkObject(CanvasState &state,
+                                            const int imported_artwork_id) {
+  state.selected_imported_artwork_id = imported_artwork_id;
+  state.selected_imported_artwork_ids.clear();
+  if (imported_artwork_id != 0) {
+    state.selected_imported_artwork_ids.push_back(imported_artwork_id);
+  }
+}
+
+bool AddSelectedImportedArtworkObject(CanvasState &state,
+                                      const int imported_artwork_id) {
+  if (imported_artwork_id == 0 ||
+      IsImportedArtworkObjectSelected(state, imported_artwork_id)) {
+    return false;
+  }
+
+  state.selected_imported_artwork_ids.push_back(imported_artwork_id);
+  if (state.selected_imported_artwork_id == 0) {
+    state.selected_imported_artwork_id = imported_artwork_id;
+  }
+  return true;
+}
+
+bool RemoveSelectedImportedArtworkObject(CanvasState &state,
+                                         const int imported_artwork_id) {
+  if (state.selected_imported_artwork_ids.empty()) {
+    if (state.selected_imported_artwork_id != imported_artwork_id) {
+      return false;
+    }
+
+    state.selected_imported_artwork_id = 0;
+    return true;
+  }
+
+  auto existing =
+      std::find(state.selected_imported_artwork_ids.begin(),
+                state.selected_imported_artwork_ids.end(), imported_artwork_id);
+  if (existing == state.selected_imported_artwork_ids.end()) {
+    return false;
+  }
+
+  state.selected_imported_artwork_ids.erase(existing);
+  if (state.selected_imported_artwork_id == imported_artwork_id) {
+    state.selected_imported_artwork_id =
+        state.selected_imported_artwork_ids.empty()
+            ? 0
+            : state.selected_imported_artwork_ids.front();
+  }
+  return true;
+}
+
+void ApplyImportedArtworkSelectionScope(
+    CanvasState &state, const ImportedArtworkSelectionScope scope) {
+  state.selection_scope = scope;
+
+  if (scope == ImportedArtworkSelectionScope::Canvas) {
+    ClearSelectedImportedElements(state);
+    if (state.selected_imported_artwork_id != 0 &&
+        state.selected_imported_artwork_ids.empty()) {
+      state.selected_imported_artwork_ids.push_back(
+          state.selected_imported_artwork_id);
+    }
+    return;
+  }
+
+  const int primary_artwork_id =
+      state.selected_imported_artwork_id != 0
+          ? state.selected_imported_artwork_id
+          : (state.selected_imported_artwork_ids.empty()
+                 ? 0
+                 : state.selected_imported_artwork_ids.front());
+  SetSingleSelectedImportedArtworkObject(state, primary_artwork_id);
+
+  std::erase_if(state.selected_imported_elements,
+                [](const ImportedElementSelection &selection) {
+                  return selection.kind != ImportedElementKind::Path;
+                });
+
+  if (state.selected_imported_debug.artwork_id != primary_artwork_id) {
+    ClearImportedDebugSelection(state);
+    return;
+  }
+
+  if (state.selected_imported_debug.kind ==
+      ImportedDebugSelectionKind::DxfText) {
+    if (!state.selected_imported_elements.empty()) {
+      state.selected_imported_debug = {
+          ImportedDebugSelectionKind::Path, primary_artwork_id,
+          state.selected_imported_elements.front().item_id};
+    } else {
+      state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                       primary_artwork_id, 0};
+    }
+  }
 }
 
 bool IsImportedElementSelected(const CanvasState &state, int artwork_id,
@@ -399,20 +535,18 @@ const Guide *FindGuide(const CanvasState &state, int guide_id) {
 }
 
 ExportArea *FindExportArea(CanvasState &state, int export_area_id) {
-  auto it =
-      std::find_if(state.export_areas.begin(), state.export_areas.end(),
-                   [export_area_id](const ExportArea &area) {
-                     return area.id == export_area_id;
-                   });
+  auto it = std::find_if(state.export_areas.begin(), state.export_areas.end(),
+                         [export_area_id](const ExportArea &area) {
+                           return area.id == export_area_id;
+                         });
   return it == state.export_areas.end() ? nullptr : &(*it);
 }
 
 const ExportArea *FindExportArea(const CanvasState &state, int export_area_id) {
-  auto it =
-      std::find_if(state.export_areas.begin(), state.export_areas.end(),
-                   [export_area_id](const ExportArea &area) {
-                     return area.id == export_area_id;
-                   });
+  auto it = std::find_if(state.export_areas.begin(), state.export_areas.end(),
+                         [export_area_id](const ExportArea &area) {
+                           return area.id == export_area_id;
+                         });
   return it == state.export_areas.end() ? nullptr : &(*it);
 }
 
@@ -570,7 +704,7 @@ void ClearImportedArtwork(CanvasState &state) {
   state.imported_artwork.clear();
   state.imported_artwork_separation_preview = {};
   state.imported_artwork_auto_cut_preview = {};
-  state.selected_imported_artwork_id = 0;
+  ClearSelectedImportedArtworkObjects(state);
   ClearImportedDebugSelection(state);
   ClearSelectedImportedElements(state);
 }
