@@ -50,9 +50,13 @@ void SetLastImportedArtworkOperation(CanvasState &state,
 
 void SetLastImportedOperationIssueElements(
     CanvasState &state, int artwork_id,
-    std::vector<ImportedElementSelection> issue_elements) {
+    std::vector<ImportedElementSelection> issue_elements,
+    const bool highlight_on_canvas = true) {
   state.last_imported_operation_issue_artwork_id = artwork_id;
   state.last_imported_operation_issue_elements = std::move(issue_elements);
+  state.highlight_last_imported_operation_issue_elements =
+      highlight_on_canvas && artwork_id != 0 &&
+      !state.last_imported_operation_issue_elements.empty();
 }
 
 void RemoveImportedGroupReference(std::vector<int> *group_ids, int group_id);
@@ -3003,7 +3007,7 @@ AnalyzeImportedArtworkContours(CanvasState &state, int imported_artwork_id) {
   std::vector<ImportedElementSelection> issue_elements;
   CollectImportedIssueElements(*artwork, &issue_elements);
   SetLastImportedOperationIssueElements(state, artwork->id,
-                                        std::move(issue_elements));
+                                        std::move(issue_elements), false);
 
   result.success = true;
   result.message = "Analyze Contours: open " +

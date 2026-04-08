@@ -1972,9 +1972,11 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
         continue;
       }
       DrawImportedDxfText(draw_list, state, canvas_rect, artwork, text);
-      if (show_issue_overlays &&
+      const bool has_visible_issue_overlay =
+          show_issue_overlays &&
           ImportedIssueOverlayVisible(state.imported_issue_overlays,
-                                      text.issue_flags)) {
+                                      text.issue_flags);
+      if (has_visible_issue_overlay) {
         const ImRect text_rect = ImportedElementScreenRect(
             state, canvas_rect.Min, artwork, text.bounds_min, text.bounds_max);
         draw_list->AddRect(
@@ -1983,7 +1985,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
                 state.theme, state.imported_issue_overlays, text.issue_flags),
             3.0f, 0, 2.0f);
       }
-      if (show_issue_overlays &&
+      if (state.highlight_last_imported_operation_issue_elements &&
+          show_issue_overlays && !has_visible_issue_overlay &&
           IsLastOperationIssueElement(state, artwork.id,
                                       ImportedElementKind::DxfText, text.id)) {
         const ImRect text_rect = ImportedElementScreenRect(
@@ -2033,9 +2036,11 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
                                              : thickness);
       }
 
-      if (show_issue_overlays &&
+      const bool has_visible_issue_overlay =
+          show_issue_overlays &&
           ImportedIssueOverlayVisible(state.imported_issue_overlays,
-                                      path.issue_flags)) {
+                                      path.issue_flags);
+      if (has_visible_issue_overlay) {
         const ImRect path_rect = ImportedElementScreenRect(
             state, canvas_rect.Min, artwork, path.bounds_min, path.bounds_max);
         draw_list->AddRect(
@@ -2044,7 +2049,8 @@ void DrawImportedArtwork(ImDrawList *draw_list, const CanvasState &state,
                 state.theme, state.imported_issue_overlays, path.issue_flags),
             3.0f, 0, 2.0f);
       }
-      if (show_issue_overlays &&
+      if (state.highlight_last_imported_operation_issue_elements &&
+          show_issue_overlays && !has_visible_issue_overlay &&
           IsLastOperationIssueElement(state, artwork.id,
                                       ImportedElementKind::Path, path.id)) {
         const ImRect path_rect = ImportedElementScreenRect(
@@ -2476,6 +2482,9 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       corner_rect.Min, corner_rect.Max,
       ImGui::ColorConvertFloat4ToU32(state.theme.ruler_background));
 
+  const bool any_popup_open =
+      ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
+
   const bool canvas_hovered = canvas_rect.Contains(io.MousePos);
   const bool top_ruler_hovered = top_ruler_rect.Contains(io.MousePos);
   const bool left_ruler_hovered = left_ruler_rect.Contains(io.MousePos);
@@ -2515,7 +2524,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         FindHoveredGuide(state, canvas_rect.Min, canvas_rect, io.MousePos);
   }
 
-  if (canvas_hovered && io.MouseWheel != 0.0f) {
+  if (!any_popup_open && canvas_hovered && io.MouseWheel != 0.0f) {
     const ImVec2 focus_world =
         ScreenToWorld(state, canvas_rect.Min, io.MousePos);
     state.view.zoom =
@@ -2525,12 +2534,12 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         io.MousePos.y - canvas_rect.Min.y - focus_world.y * state.view.zoom);
   }
 
-  if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+  if (!any_popup_open && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
     transient_state.right_mouse_pressed_in_canvas = canvas_hovered;
     transient_state.right_mouse_dragged = false;
   }
 
-  if (transient_state.right_mouse_pressed_in_canvas &&
+  if (!any_popup_open && transient_state.right_mouse_pressed_in_canvas &&
       ImGui::IsMouseDragging(ImGuiMouseButton_Right,
                              kRightDragStartDistancePixels)) {
     state.view.pan.x += io.MouseDelta.x;
@@ -2538,7 +2547,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     transient_state.right_mouse_dragged = true;
   }
 
-  if (!transient_state.creating_guide &&
+  if (!any_popup_open && !transient_state.creating_guide &&
       (top_ruler_hovered || left_ruler_hovered) &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     transient_state.creating_guide = true;
@@ -2566,7 +2575,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     }
   }
 
-  if (!transient_state.creating_guide && canvas_hovered &&
+  if (!any_popup_open && !transient_state.creating_guide && canvas_hovered &&
       ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (hovered_guide_id != 0) {
       if (Guide *guide = FindGuide(state, hovered_guide_id);
@@ -2947,9 +2956,17 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
 
   EnsureObjectScopeArtworkContext(state, &transient_state);
 
-  if (IsCanvasArtworkScope(state) && imported_artwork_hit.id != 0 &&
+  if (!any_popup_open && hovered_guide_id != 0 &&
       ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
       !transient_state.right_mouse_dragged) {
+    transient_state.context_guide_id = hovered_guide_id;
+    transient_state.context_imported_artwork_id = 0;
+    state.selected_guide_id = hovered_guide_id;
+    ImGui::OpenPopup("guide_context_menu");
+  } else if (!any_popup_open && IsCanvasArtworkScope(state) &&
+             imported_artwork_hit.id != 0 &&
+             ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+             !transient_state.right_mouse_dragged) {
     transient_state.context_imported_artwork_id = imported_artwork_hit.id;
     if (!IsCanvasArtworkScope(state) ||
         !IsImportedArtworkObjectSelected(state, imported_artwork_hit.id)) {
@@ -2960,17 +2977,12 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
                                      imported_artwork_hit.id, 0};
     ImGui::OpenPopup("imported_artwork_context_menu");
-  } else if (hovered_guide_id != 0 &&
-             ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
-             !transient_state.right_mouse_dragged) {
-    transient_state.context_guide_id = hovered_guide_id;
-    state.selected_guide_id = hovered_guide_id;
-    ImGui::OpenPopup("guide_context_menu");
-  } else if ((top_ruler_hovered || left_ruler_hovered) &&
+  } else if (!any_popup_open && (top_ruler_hovered || left_ruler_hovered) &&
              ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
              !transient_state.right_mouse_dragged) {
     ImGui::OpenPopup("ruler_context_menu");
-  } else if (canvas_hovered && ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
+  } else if (!any_popup_open && canvas_hovered &&
+             ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
              !transient_state.right_mouse_dragged) {
     ImGui::OpenPopup("canvas_context_menu");
   }

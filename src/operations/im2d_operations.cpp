@@ -35,9 +35,13 @@ void SetLastImportedArtworkOperation(
 
 void SetLastImportedOperationIssueElements(
     im2d::CanvasState &state, int artwork_id,
-    std::vector<im2d::ImportedElementSelection> issue_elements) {
+    std::vector<im2d::ImportedElementSelection> issue_elements,
+    const bool highlight_on_canvas = true) {
   state.last_imported_operation_issue_artwork_id = artwork_id;
   state.last_imported_operation_issue_elements = std::move(issue_elements);
+  state.highlight_last_imported_operation_issue_elements =
+      highlight_on_canvas && artwork_id != 0 &&
+      !state.last_imported_operation_issue_elements.empty();
 }
 
 void ResetImportedArtworkCounters(im2d::ImportedArtwork &artwork) {

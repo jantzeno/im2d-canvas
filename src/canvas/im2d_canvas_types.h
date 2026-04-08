@@ -68,7 +68,7 @@ struct CanvasTheme {
   ImVec4 grid_minor = ImVec4(0.22f, 0.26f, 0.31f, 0.30f);
   ImVec4 guide = ImVec4(0.90f, 0.38f, 0.29f, 1.0f);
   ImVec4 guide_hovered = ImVec4(1.00f, 0.62f, 0.22f, 1.0f);
-  ImVec4 guide_locked = ImVec4(0.72f, 0.72f, 0.76f, 1.0f);
+  ImVec4 guide_locked = ImVec4(0.78f, 0.30f, 0.22f, 1.0f);
   ImVec4 working_area_fill = ImVec4(0.19f, 0.22f, 0.19f, 0.92f);
   ImVec4 working_area_border = ImVec4(0.58f, 0.74f, 0.58f, 1.0f);
   ImVec4 working_area_selected = ImVec4(0.97f, 0.82f, 0.36f, 1.0f);
@@ -555,6 +555,7 @@ struct CanvasState {
   ImportedArtworkAutoCutPreview imported_artwork_auto_cut_preview;
   ImportedArtworkOperationResult last_imported_artwork_operation;
   int last_imported_operation_issue_artwork_id = 0;
+  bool highlight_last_imported_operation_issue_elements = false;
   std::vector<ImportedElementSelection> last_imported_operation_issue_elements;
   int next_guide_id = 1;
   int next_working_area_id = 1;
