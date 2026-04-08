@@ -51,10 +51,16 @@ target("merge_workspace_compile_commands")
         })
     end)
 
+local spdlog_include_dir = "vendor/spdlog-1.17.0/include"
+local lunasvg_root = "vendor/lunasvg"
+local libdxfrw_root = "vendor/libdxfrw"
+local clipper2_root = "vendor/Clipper2"
+local nanosvg_dir = "vendor/nanosvg/src"
+
 target("vendor_spdlog")
     set_kind("headeronly")
     set_default(false)
-    add_includedirs("vendor/spdlog-1.17.0/include", {public = true})
+    add_includedirs(spdlog_include_dir, {public = true})
 
 target("im2d_logging")
     set_kind("static")
@@ -67,8 +73,15 @@ target("vendor_lunasvg")
     set_kind("static")
     set_default(false)
     set_warnings("none")
-    add_includedirs("vendor/lunasvg/include", "vendor/lunasvg/source", "vendor/lunasvg/plutovg/include", "vendor/lunasvg/plutovg/source", {public = true})
-    add_files("vendor/lunasvg/source/*.cpp", "vendor/lunasvg/plutovg/source/*.c")
+    add_includedirs(
+        path.join(lunasvg_root, "include"),
+        path.join(lunasvg_root, "source"),
+        path.join(lunasvg_root, "plutovg", "include"),
+        path.join(lunasvg_root, "plutovg", "source"),
+        {public = true})
+    add_files(
+        path.join(lunasvg_root, "source", "*.cpp"),
+        path.join(lunasvg_root, "plutovg", "source", "*.c"))
     add_defines("LUNASVG_BUILD", "LUNASVG_BUILD_STATIC", {public = true})
     add_syslinks("m")
 
@@ -76,23 +89,23 @@ target("vendor_libdxfrw")
     set_kind("static")
     set_default(false)
     set_warnings("none")
-    add_includedirs("vendor/libdxfrw/src", "vendor/libdxfrw/src/intern", {public = true})
-    add_files("vendor/libdxfrw/src/*.cpp", "vendor/libdxfrw/src/intern/*.cpp")
+    add_includedirs(path.join(libdxfrw_root, "src"), path.join(libdxfrw_root, "src", "intern"), {public = true})
+    add_files(path.join(libdxfrw_root, "src", "*.cpp"), path.join(libdxfrw_root, "src", "intern", "*.cpp"))
     add_syslinks("m")
 
 target("vendor_clipper2")
     set_kind("static")
     set_default(false)
     set_warnings("none")
-    add_includedirs("vendor/Clipper2/CPP/Clipper2Lib/include", {public = true})
-    add_files("vendor/Clipper2/CPP/Clipper2Lib/src/*.cpp")
+    add_includedirs(path.join(clipper2_root, "CPP", "Clipper2Lib", "include"), {public = true})
+    add_files(path.join(clipper2_root, "CPP", "Clipper2Lib", "src", "*.cpp"))
 
 target("im2d_import")
     set_kind("static")
     set_default(false)
     set_warnings("all")
     add_files("src/import/*.cpp")
-    add_includedirs("vendor/nanosvg/src")
+    add_includedirs(nanosvg_dir)
     add_deps("im2d_canvas", "im2d_operations", "im2d_logging", "vendor_lunasvg", "vendor_libdxfrw")
     add_packages("imgui", "freetype")
 
