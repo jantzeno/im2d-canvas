@@ -1,6 +1,8 @@
 #include "im2d_export_svg.h"
 
 #include "../canvas/im2d_canvas_document.h"
+#include "../common/im2d_format_utils.h"
+#include "../common/im2d_xml_utils.h"
 
 #include <algorithm>
 #include <cmath>
@@ -43,25 +45,7 @@ struct ExportPlan {
 };
 
 std::string FormatNumber(float value) {
-  std::ostringstream stream;
-  stream << std::fixed << std::setprecision(6) << value;
-  std::string text = stream.str();
-  const size_t decimal = text.find('.');
-  if (decimal == std::string::npos) {
-    return text;
-  }
-  size_t trim = text.size();
-  while (trim > decimal + 1 && text[trim - 1] == '0') {
-    --trim;
-  }
-  if (trim > decimal && text[trim - 1] == '.') {
-    --trim;
-  }
-  text.resize(trim);
-  if (text.empty() || text == "-0") {
-    return "0";
-  }
-  return text;
+  return im2d::FormatNumber(value, 6, true);
 }
 
 std::string ColorToHex(const ImVec4 &color) {
@@ -76,33 +60,7 @@ std::string ColorToHex(const ImVec4 &color) {
   return stream.str();
 }
 
-std::string EscapeXml(std::string_view value) {
-  std::string escaped;
-  escaped.reserve(value.size());
-  for (const char character : value) {
-    switch (character) {
-    case '&':
-      escaped += "&amp;";
-      break;
-    case '<':
-      escaped += "&lt;";
-      break;
-    case '>':
-      escaped += "&gt;";
-      break;
-    case '"':
-      escaped += "&quot;";
-      break;
-    case '\'':
-      escaped += "&apos;";
-      break;
-    default:
-      escaped.push_back(character);
-      break;
-    }
-  }
-  return escaped;
-}
+std::string EscapeXml(std::string_view value) { return im2d::EscapeXml(value); }
 
 WorldRect MakeRect(const ImVec2 &a, const ImVec2 &b) {
   WorldRect rect;

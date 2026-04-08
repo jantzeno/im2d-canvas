@@ -1,7 +1,10 @@
 #include "im2d_import.h"
 
 #include "../canvas/im2d_canvas_document.h"
+#include "../common/im2d_format_utils.h"
 #include "../common/im2d_log.h"
+#include "../common/im2d_string_utils.h"
+#include "../common/im2d_xml_utils.h"
 #include "../operations/im2d_operations.h"
 
 #include <algorithm>
@@ -38,9 +41,7 @@ constexpr int kPolylineFlagClosed = 0x01;
 constexpr int kPolylineFlagPolyfaceMesh = 0x40;
 
 std::string FormatNumber(double value) {
-  std::ostringstream stream;
-  stream << std::fixed << std::setprecision(3) << value;
-  return stream.str();
+  return im2d::FormatNumber(value, 3, false);
 }
 
 std::string StrokeColorForEntity(const DRW_Entity &entity) {
@@ -168,12 +169,7 @@ std::string NormalizeDxfText(const std::string &text) {
 }
 
 std::string LowercaseCopy(std::string_view value) {
-  std::string lowered(value);
-  std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-                 [](unsigned char character) {
-                   return static_cast<char>(std::tolower(character));
-                 });
-  return lowered;
+  return im2d::LowercaseCopy(value);
 }
 
 bool HasSupportedFontExtension(const std::filesystem::path &path) {
@@ -297,19 +293,7 @@ std::string BasenameLower(std::string_view value) {
       std::filesystem::path(std::string(value)).filename().string());
 }
 
-std::string TrimCopy(std::string_view value) {
-  size_t begin = 0;
-  size_t end = value.size();
-  while (begin < end &&
-         std::isspace(static_cast<unsigned char>(value[begin])) != 0) {
-    begin += 1;
-  }
-  while (end > begin &&
-         std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
-    end -= 1;
-  }
-  return std::string(value.substr(begin, end - begin));
-}
+std::string TrimCopy(std::string_view value) { return im2d::TrimCopy(value); }
 
 struct DxfFontPolicyEntry {
   std::string style_name;
@@ -371,31 +355,7 @@ std::unordered_map<std::string, DxfFontPolicyEntry> LoadDxfFontPolicy() {
 }
 
 std::string EscapeXmlAttribute(std::string_view value) {
-  std::string escaped;
-  escaped.reserve(value.size());
-  for (const char character : value) {
-    switch (character) {
-    case '&':
-      escaped += "&amp;";
-      break;
-    case '"':
-      escaped += "&quot;";
-      break;
-    case '\'':
-      escaped += "&apos;";
-      break;
-    case '<':
-      escaped += "&lt;";
-      break;
-    case '>':
-      escaped += "&gt;";
-      break;
-    default:
-      escaped.push_back(character);
-      break;
-    }
-  }
-  return escaped;
+  return im2d::EscapeXml(value);
 }
 
 std::filesystem::path ResolveVectorFontPath() {
