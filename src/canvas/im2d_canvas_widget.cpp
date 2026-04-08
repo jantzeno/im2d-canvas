@@ -3,7 +3,9 @@
 #include "im2d_canvas_document.h"
 #include "im2d_canvas_imported_artwork_ops.h"
 #include "im2d_canvas_internal.h"
+#include "im2d_canvas_notification.h"
 #include "im2d_canvas_snap.h"
+#include "im2d_canvas_undo.h"
 #include "im2d_canvas_units.h"
 
 #include <algorithm>
@@ -445,6 +447,8 @@ void BeginImportedArtworkDrag(CanvasState &state,
     return;
   }
 
+  PushUndoSnapshot(state, "Move imported artwork");
+
   transient_state->imported_artwork_drag_offset =
       ImVec2(mouse_world.x - anchor_artwork->origin.x,
              mouse_world.y - anchor_artwork->origin.y);
@@ -478,6 +482,8 @@ void BeginSelectedImportedArtworkResize(CanvasState &state,
           &transient_state->imported_artwork_resize_initial_world_rect)) {
     return;
   }
+
+  PushUndoSnapshot(state, "Resize imported artwork");
 
   const std::vector<int> selected_artwork_ids =
       GetSelectedImportedArtworkObjects(state);
@@ -546,6 +552,23 @@ void ClearAllImportedSelection(CanvasState &state) {
   ClearSelectedImportedArtworkObjects(state);
   ClearImportedDebugSelection(state);
   ClearSelectedImportedElements(state);
+}
+
+void SelectAllVisibleImportedArtwork(CanvasState &state) {
+  ClearAllImportedSelection(state);
+  for (const ImportedArtwork &artwork : state.imported_artwork) {
+    if (!artwork.visible) {
+      continue;
+    }
+    AddSelectedImportedArtworkObject(state, artwork.id);
+  }
+
+  if (!state.selected_imported_artwork_ids.empty()) {
+    state.selected_imported_artwork_id =
+        state.selected_imported_artwork_ids.front();
+    state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                     state.selected_imported_artwork_id, 0};
+  }
 }
 
 void ClearImportedSelectionForCurrentScope(CanvasState &state,
@@ -648,6 +671,7 @@ ImportedArtworkOperationResult ApplyImportedArtworkTransformToSelection(
     CanvasState &state, const int fallback_artwork_id,
     const char *operation_name,
     const std::function<bool(CanvasState &, int)> &operation) {
+  ScopedUndoTransaction undo_transaction(state, operation_name);
   return ApplyImportedArtworkOperationToSelection(
       state, fallback_artwork_id, operation_name,
       [&operation_name, &operation](CanvasState &callback_state,
@@ -975,27 +999,102 @@ PreviewLabelForPart(ImportedSeparationPreviewClassification classification,
   return "Orphan";
 }
 
+enum class ActiveCanvasNotification {
+  None,
+  GuideSplitPreview,
+  AutoCutPreview,
+  CallerNotification,
+};
+
+struct ActiveCanvasNotificationContent {
+  ActiveCanvasNotification kind = ActiveCanvasNotification::None;
+  const char *title = nullptr;
+  std::string summary;
+  CanvasNotificationDismissMode dismiss_mode =
+      CanvasNotificationDismissMode::UserClosable;
+  CanvasNotificationId notification_id = 0;
+};
+
+ActiveCanvasNotification
+ResolveActiveCanvasNotification(const CanvasState &state) {
+  if (state.imported_artwork_auto_cut_preview.active) {
+    return ActiveCanvasNotification::AutoCutPreview;
+  }
+  if (state.imported_artwork_separation_preview.active) {
+    return ActiveCanvasNotification::GuideSplitPreview;
+  }
+  if (state.canvas_notification.active) {
+    return ActiveCanvasNotification::CallerNotification;
+  }
+  return ActiveCanvasNotification::None;
+}
+
+ActiveCanvasNotificationContent
+BuildActiveCanvasNotificationContent(const CanvasState &state) {
+  ActiveCanvasNotificationContent content;
+  content.kind = ResolveActiveCanvasNotification(state);
+  switch (content.kind) {
+  case ActiveCanvasNotification::GuideSplitPreview:
+    content.title = "Guide Split Preview Active";
+    content.summary =
+        std::to_string(
+            state.imported_artwork_separation_preview.future_object_count) +
+        " objects, " +
+        std::to_string(
+            state.imported_artwork_separation_preview.skipped_count) +
+        " skipped";
+    break;
+  case ActiveCanvasNotification::AutoCutPreview:
+    content.title = "Auto Cut Preview Active";
+    content.summary =
+        std::to_string(
+            state.imported_artwork_auto_cut_preview.future_band_count) +
+        " bands, " +
+        std::to_string(state.imported_artwork_auto_cut_preview.skipped_count) +
+        " skipped";
+    break;
+  case ActiveCanvasNotification::CallerNotification:
+    content.title = state.canvas_notification.title.c_str();
+    content.summary = state.canvas_notification.summary;
+    content.dismiss_mode = state.canvas_notification.dismiss_mode;
+    content.notification_id = state.canvas_notification.id;
+    break;
+  case ActiveCanvasNotification::None:
+    break;
+  }
+  return content;
+}
+
+void DrawCallerNotification(ImDrawList *draw_list, const CanvasState &state,
+                            const ImRect &canvas_rect) {
+  const CanvasNotificationState &notification = state.canvas_notification;
+  if (!notification.active) {
+    return;
+  }
+
+  DrawCanvasNotificationBanner(
+      draw_list,
+      {.min = ImVec2(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f)},
+      CanvasNotificationBannerStyleFromTheme(state.theme),
+      notification.title.c_str(), notification.summary,
+      notification.dismiss_mode);
+}
+
 void DrawBandPreviewOverlay(
     ImDrawList *draw_list, const CanvasState &state, const ImRect &canvas_rect,
     int artwork_id, const std::vector<float> &vertical_positions,
     const std::vector<float> &horizontal_positions,
     const std::vector<ImportedSeparationPreviewPart> &parts, const char *title,
-    const std::string &preview_summary) {
+    const std::string &preview_summary, const bool show_notification,
+    const CanvasNotificationDismissMode dismiss_mode) {
   draw_list->PushClipRect(canvas_rect.Min, canvas_rect.Max, true);
-  const ImVec2 banner_min(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f);
-  const ImVec2 banner_max(canvas_rect.Min.x + 360.0f,
-                          canvas_rect.Min.y + 72.0f);
-  draw_list->AddRectFilled(
-      banner_min, banner_max,
-      ThemeColorToU32(state.theme.preview_banner_background), 6.0f);
-  draw_list->AddRect(banner_min, banner_max,
-                     ThemeColorToU32(state.theme.preview_banner_border), 6.0f,
-                     0, 1.5f);
-  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 10.0f),
-                     ThemeColorToU32(state.theme.preview_banner_title), title);
-  draw_list->AddText(ImVec2(banner_min.x + 10.0f, banner_min.y + 34.0f),
-                     ThemeColorToU32(state.theme.preview_banner_summary),
-                     preview_summary.c_str());
+  if (show_notification) {
+    DrawCanvasNotificationBanner(
+        draw_list,
+        {.min = ImVec2(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f)},
+        CanvasNotificationBannerStyleFromTheme(state.theme), title,
+        preview_summary, dismiss_mode);
+  }
 
   ImRect preview_artwork_rect = canvas_rect;
   if (const ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id)) {
@@ -1048,7 +1147,7 @@ void DrawBandPreviewOverlay(
                          region.colors.stroke, 0.0f, 0, 2.0f);
 
       const std::string bucket_label =
-          "Band " + std::to_string(region.bucket_index + 1);
+          "Split " + std::to_string(region.bucket_index + 1);
       const ImVec2 label_pos(clipped_band_rect.Min.x + 10.0f,
                              clipped_band_rect.Min.y + 10.0f);
       draw_list->AddText(label_pos, region.colors.stroke, bucket_label.c_str());
@@ -1413,9 +1512,10 @@ bool IsLastOperationIssueElement(const CanvasState &state, int artwork_id,
       });
 }
 
-void DrawSeparationPreviewOverlay(ImDrawList *draw_list,
-                                  const CanvasState &state,
-                                  const ImRect &canvas_rect) {
+void DrawSeparationPreviewOverlay(
+    ImDrawList *draw_list, const CanvasState &state, const ImRect &canvas_rect,
+    const bool show_notification,
+    const CanvasNotificationDismissMode dismiss_mode) {
   const ImportedArtworkSeparationPreview &preview =
       state.imported_artwork_separation_preview;
   if (!preview.active) {
@@ -1445,11 +1545,13 @@ void DrawSeparationPreviewOverlay(ImDrawList *draw_list,
   DrawBandPreviewOverlay(draw_list, state, canvas_rect, preview.artwork_id,
                          vertical_positions, horizontal_positions,
                          preview.parts, "Guide Split Preview Active",
-                         preview_summary);
+                         preview_summary, show_notification, dismiss_mode);
 }
 
-void DrawAutoCutPreviewOverlay(ImDrawList *draw_list, const CanvasState &state,
-                               const ImRect &canvas_rect) {
+void DrawAutoCutPreviewOverlay(
+    ImDrawList *draw_list, const CanvasState &state, const ImRect &canvas_rect,
+    const bool show_notification,
+    const CanvasNotificationDismissMode dismiss_mode) {
   const ImportedArtworkAutoCutPreview &preview =
       state.imported_artwork_auto_cut_preview;
   if (!preview.active) {
@@ -1462,7 +1564,8 @@ void DrawAutoCutPreviewOverlay(ImDrawList *draw_list, const CanvasState &state,
   DrawBandPreviewOverlay(draw_list, state, canvas_rect, preview.artwork_id,
                          preview.vertical_positions,
                          preview.horizontal_positions, preview.parts,
-                         "Auto Cut Preview Active", preview_summary);
+                         "Auto Cut Preview Active", preview_summary,
+                         show_notification, dismiss_mode);
 }
 
 void RemoveGuide(CanvasState &state, int guide_id) {
@@ -2486,13 +2589,64 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
 
   const bool canvas_hovered = canvas_rect.Contains(io.MousePos);
+  const ActiveCanvasNotificationContent notification_content =
+      BuildActiveCanvasNotificationContent(state);
+  const ActiveCanvasNotification active_notification =
+      notification_content.kind;
+  const bool notification_visible =
+      active_notification != ActiveCanvasNotification::None;
+  const CanvasNotificationBannerLayout notification_layout = {
+      .min = ImVec2(canvas_rect.Min.x + 12.0f, canvas_rect.Min.y + 12.0f)};
+  const CanvasNotificationBannerStyle notification_style =
+      CanvasNotificationBannerStyleFromTheme(state.theme);
+  const CanvasNotificationDismissMode notification_dismiss_mode =
+      notification_content.dismiss_mode;
+  const CanvasNotificationBannerLayout resolved_notification_layout =
+      notification_visible
+          ? ResolveCanvasNotificationBannerLayout(
+                notification_layout, notification_style,
+                notification_content.title, notification_content.summary,
+                notification_dismiss_mode)
+          : notification_layout;
+  const bool notification_hovered =
+      notification_visible &&
+      CanvasNotificationBannerContainsPoint(
+          resolved_notification_layout, notification_style,
+          notification_content.title, notification_content.summary,
+          notification_dismiss_mode, io.MousePos);
+  const bool notification_close_clicked =
+      !any_popup_open && notification_visible &&
+      CanvasNotificationBannerCloseButtonContainsPoint(
+          resolved_notification_layout, notification_style,
+          notification_content.title, notification_content.summary,
+          notification_dismiss_mode, io.MousePos) &&
+      ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+  if (notification_close_clicked) {
+    if (active_notification == ActiveCanvasNotification::AutoCutPreview) {
+      ClearImportedArtworkAutoCutPreview(state);
+    } else if (active_notification ==
+               ActiveCanvasNotification::GuideSplitPreview) {
+      ClearImportedArtworkSeparationPreview(state);
+    } else if (active_notification ==
+               ActiveCanvasNotification::CallerNotification) {
+      DismissCanvasNotification(state, notification_content.notification_id);
+    }
+  }
+  const bool canvas_input_hovered = canvas_hovered && !notification_hovered;
+  if (canvas_hovered) {
+    state.runtime.has_cursor_world = true;
+    state.runtime.cursor_world =
+        ScreenToWorld(state, canvas_rect.Min, io.MousePos);
+  }
   const bool top_ruler_hovered = top_ruler_rect.Contains(io.MousePos);
   const bool left_ruler_hovered = left_ruler_rect.Contains(io.MousePos);
   const ImportedArtworkHit imported_artwork_hit =
-      FindHoveredImportedArtwork(state, canvas_rect.Min, canvas_rect,
-                                 io.MousePos, options.resize_handle_size);
+      canvas_input_hovered
+          ? FindHoveredImportedArtwork(state, canvas_rect.Min, canvas_rect,
+                                       io.MousePos, options.resize_handle_size)
+          : ImportedArtworkHit{};
   const ImportedPathHit imported_path_hit =
-      IsCanvasArtworkScope(state)
+      !canvas_input_hovered || IsCanvasArtworkScope(state)
           ? ImportedPathHit{}
           : FindHoveredImportedPath(state, canvas_rect.Min, canvas_rect,
                                     io.MousePos, 6.0f);
@@ -2513,18 +2667,20 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     }
   }
   const WorkingAreaHit area_hit =
-      FindHoveredWorkingArea(state, canvas_rect.Min, canvas_rect, io.MousePos,
-                             options.resize_handle_size);
+      canvas_input_hovered
+          ? FindHoveredWorkingArea(state, canvas_rect.Min, canvas_rect,
+                                   io.MousePos, options.resize_handle_size)
+          : WorkingAreaHit{};
   const bool marquee_mode_active =
       state.imported_artwork_edit_mode != ImportedArtworkEditMode::None;
 
   int hovered_guide_id = 0;
-  if (canvas_hovered && !transient_state.creating_guide) {
+  if (canvas_input_hovered && !transient_state.creating_guide) {
     hovered_guide_id =
         FindHoveredGuide(state, canvas_rect.Min, canvas_rect, io.MousePos);
   }
 
-  if (!any_popup_open && canvas_hovered && io.MouseWheel != 0.0f) {
+  if (!any_popup_open && canvas_input_hovered && io.MouseWheel != 0.0f) {
     const ImVec2 focus_world =
         ScreenToWorld(state, canvas_rect.Min, io.MousePos);
     state.view.zoom =
@@ -2535,7 +2691,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   }
 
   if (!any_popup_open && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-    transient_state.right_mouse_pressed_in_canvas = canvas_hovered;
+    transient_state.right_mouse_pressed_in_canvas = canvas_input_hovered;
     transient_state.right_mouse_dragged = false;
   }
 
@@ -2575,8 +2731,8 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     }
   }
 
-  if (!any_popup_open && !transient_state.creating_guide && canvas_hovered &&
-      ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+  if (!any_popup_open && !transient_state.creating_guide &&
+      canvas_input_hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
     if (hovered_guide_id != 0) {
       if (Guide *guide = FindGuide(state, hovered_guide_id);
           guide != nullptr && !guide->locked) {
@@ -2677,6 +2833,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
               HasImportedArtworkFlag(artwork->flags,
                                      ImportedArtworkFlagResizable) &&
               CountSelectedImportedArtworkObjects(state) == 1) {
+            PushUndoSnapshot(state, "Resize imported artwork");
             transient_state.resizing_imported_artwork_id =
                 imported_artwork_hit.id;
             transient_state.imported_artwork_resize_initial_scale =
@@ -2981,7 +3138,7 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
              ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
              !transient_state.right_mouse_dragged) {
     ImGui::OpenPopup("ruler_context_menu");
-  } else if (!any_popup_open && canvas_hovered &&
+  } else if (!any_popup_open && canvas_input_hovered &&
              ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
              !transient_state.right_mouse_dragged) {
     ImGui::OpenPopup("canvas_context_menu");
@@ -2997,8 +3154,17 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                    state.selected_working_area_id, options);
   DrawImportedArtwork(draw_list, state, canvas_rect,
                       state.selected_imported_artwork_id, options);
-  DrawSeparationPreviewOverlay(draw_list, state, canvas_rect);
-  DrawAutoCutPreviewOverlay(draw_list, state, canvas_rect);
+  if (active_notification == ActiveCanvasNotification::CallerNotification) {
+    DrawCallerNotification(draw_list, state, canvas_rect);
+  }
+  DrawSeparationPreviewOverlay(draw_list, state, canvas_rect,
+                               active_notification ==
+                                   ActiveCanvasNotification::GuideSplitPreview,
+                               CanvasNotificationDismissMode::UserClosable);
+  DrawAutoCutPreviewOverlay(draw_list, state, canvas_rect,
+                            active_notification ==
+                                ActiveCanvasNotification::AutoCutPreview,
+                            CanvasNotificationDismissMode::UserClosable);
   DrawGuides(draw_list, state, canvas_rect, hovered_guide_id, transient_state);
   DrawImportedMarquee(draw_list, state, canvas_rect, transient_state);
   DrawRulerAxis(draw_list, state, top_ruler_rect, true);
@@ -3034,23 +3200,67 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     if (ImportedArtwork *artwork = FindImportedArtwork(
             state, transient_state.context_imported_artwork_id);
         artwork != nullptr) {
-      if (ImGui::MenuItem("Prepare For Cutting")) {
-        ApplyImportedArtworkOperationToSelection(
-            state, artwork->id, "Prepare For Cutting",
-            [](CanvasState &callback_state, const int target_artwork_id) {
-              return PrepareImportedArtworkForCutting(callback_state,
-                                                      target_artwork_id);
-            });
+      const bool can_copy = CanCopySelectionToClipboard(state);
+      const bool can_paste = HasClipboardContent(state);
+      const bool can_group_artworks =
+          HasGroupableImportedArtworkSelection(state);
+      const bool can_group_selection =
+          HasGroupableImportedElementSelection(state, *artwork);
+      const bool can_group_root =
+          HasGroupableImportedRootSelection(state, *artwork);
+      const bool can_group =
+          can_group_artworks || can_group_selection || can_group_root;
+      const bool can_ungroup_artworks =
+          HasUngroupableImportedArtworkSelection(state, *artwork);
+      const bool can_ungroup_debug =
+          HasUngroupableImportedDebugSelection(state, *artwork);
+      const bool can_ungroup = can_ungroup_artworks || can_ungroup_debug;
+      const bool has_preview =
+          (state.imported_artwork_separation_preview.active &&
+           state.imported_artwork_separation_preview.artwork_id ==
+               artwork->id) ||
+          (state.imported_artwork_auto_cut_preview.active &&
+           state.imported_artwork_auto_cut_preview.artwork_id == artwork->id);
+      const bool can_apply_auto_split =
+          state.imported_artwork_auto_cut_preview.active &&
+          state.imported_artwork_auto_cut_preview.artwork_id == artwork->id &&
+          state.imported_artwork_auto_cut_preview.future_band_count > 1;
+      const float minimum_gap =
+          state.imported_artwork_auto_cut_preview.active &&
+                  state.imported_artwork_auto_cut_preview.artwork_id ==
+                      artwork->id
+              ? state.imported_artwork_auto_cut_preview.minimum_gap
+              : 5.0f;
+
+      if (ImGui::MenuItem("Cut", "Ctrl+X", false, can_copy)) {
+        CutSelectedToClipboard(state);
         ImGui::CloseCurrentPopup();
       }
-      if (ImGui::MenuItem("Prepare + Weld Cleanup")) {
-        ApplyImportedArtworkOperationToSelection(
-            state, artwork->id, "Prepare + Weld Cleanup",
-            [](CanvasState &callback_state, const int target_artwork_id) {
-              return PrepareImportedArtworkForCutting(
-                  callback_state, target_artwork_id, 0.5f,
-                  ImportedArtworkPrepareMode::AggressiveCleanup);
-            });
+      if (ImGui::MenuItem("Copy", "Ctrl+C", false, can_copy)) {
+        CopySelectedToClipboard(state);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Paste", "Ctrl+V", false, can_paste)) {
+        PasteFromClipboard(state);
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Group", "Ctrl+G", false, can_group)) {
+        if (can_group_artworks) {
+          GroupSelectedImportedArtworkObjects(state);
+        } else if (can_group_selection) {
+          GroupSelectedImportedElements(state, artwork->id);
+        } else {
+          GroupImportedArtworkRootContents(state, artwork->id);
+        }
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Ungroup", "Ctrl+Shift+G", false, can_ungroup)) {
+        if (can_ungroup_artworks) {
+          UngroupSelectedImportedArtworkObjects(state);
+        } else {
+          UngroupSelectedImportedGroup(state, artwork->id);
+        }
         ImGui::CloseCurrentPopup();
       }
       ImGui::Separator();
@@ -3091,12 +3301,81 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
         ImGui::CloseCurrentPopup();
       }
       ImGui::Separator();
-      if (ImGui::MenuItem("Delete")) {
-        ApplyImportedArtworkTransformToSelection(
-            state, artwork->id, "Delete",
+      if (ImGui::MenuItem("Hide Selected")) {
+        HideSelectedImportedArtwork(state);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Isolate")) {
+        IsolateSelectedImportedArtwork(state);
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Analyze Contours")) {
+        ApplyImportedArtworkOperationToSelection(
+            state, artwork->id, "Analyze Contours",
             [](CanvasState &callback_state, const int target_artwork_id) {
-              return DeleteImportedArtwork(callback_state, target_artwork_id);
+              return AnalyzeImportedArtworkContours(callback_state,
+                                                    target_artwork_id);
             });
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::BeginMenu("Repair")) {
+        if (ImGui::MenuItem("Join Open Segments")) {
+          ApplyImportedArtworkOperationToSelection(
+              state, artwork->id, "Join Open Segments",
+              [](CanvasState &callback_state, const int target_artwork_id) {
+                return JoinImportedArtworkOpenSegments(callback_state,
+                                                       target_artwork_id);
+              });
+          ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Repair Orphan Holes")) {
+          ApplyImportedArtworkOperationToSelection(
+              state, artwork->id, "Repair Orphan Holes",
+              [](CanvasState &callback_state, const int target_artwork_id) {
+                return RepairImportedArtworkOrphanHoles(callback_state,
+                                                        target_artwork_id);
+              });
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndMenu();
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Clear Preview", nullptr, false, has_preview)) {
+        ClearImportedArtworkSeparationPreview(state);
+        ClearImportedArtworkAutoCutPreview(state);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::BeginMenu("Preview Auto-Split")) {
+        if (ImGui::MenuItem("Horizontal")) {
+          PreviewImportedArtworkAutoCut(state, artwork->id,
+                                        AutoCutPreviewAxisMode::HorizontalOnly,
+                                        minimum_gap);
+          ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Vertical")) {
+          PreviewImportedArtworkAutoCut(state, artwork->id,
+                                        AutoCutPreviewAxisMode::VerticalOnly,
+                                        minimum_gap);
+          ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Both")) {
+          PreviewImportedArtworkAutoCut(
+              state, artwork->id, AutoCutPreviewAxisMode::Both, minimum_gap);
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::MenuItem("Apply Auto-Split", nullptr, false,
+                          can_apply_auto_split)) {
+        ApplyImportedArtworkAutoCut(
+            state, artwork->id,
+            state.imported_artwork_auto_cut_preview.axis_mode, minimum_gap);
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Delete", "Delete")) {
+        DeleteSelectedImportedContent(state);
         transient_state.context_imported_artwork_id = 0;
         transient_state.dragging_imported_artwork.clear();
         transient_state.resizing_imported_artwork_group.clear();
@@ -3113,9 +3392,48 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   if (ImGui::BeginPopup("guide_context_menu")) {
     if (Guide *guide = FindGuide(state, transient_state.context_guide_id);
         guide != nullptr) {
+      const int selected_artwork_count =
+          CountSelectedImportedArtworkObjects(state);
+      const int fallback_artwork_id = state.selected_imported_artwork_id;
+      const bool can_run_guide_split = guide->id != 0 &&
+                                       selected_artwork_count == 1 &&
+                                       fallback_artwork_id != 0;
+      const bool has_preview =
+          state.imported_artwork_separation_preview.active ||
+          state.imported_artwork_auto_cut_preview.active;
+
       if (ImGui::MenuItem(guide->locked ? "Unlock guide" : "Lock guide")) {
         guide->locked = !guide->locked;
       }
+      ImGui::Separator();
+      if (ImGui::MenuItem("Clear Preview", nullptr, false, has_preview)) {
+        ClearImportedArtworkSeparationPreview(state);
+        ClearImportedArtworkAutoCutPreview(state);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Preview Guide Split", nullptr, false,
+                          can_run_guide_split)) {
+        ApplyImportedArtworkOperationToSelection(
+            state, fallback_artwork_id, "Preview Guide Split",
+            [guide_id = guide->id](CanvasState &callback_state,
+                                   const int target_artwork_id) {
+              return PreviewSeparateImportedArtworkByGuide(
+                  callback_state, target_artwork_id, guide_id);
+            });
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Apply Guide Split", nullptr, false,
+                          can_run_guide_split)) {
+        ApplyImportedArtworkOperationToSelection(
+            state, fallback_artwork_id, "Apply Guide Split",
+            [guide_id = guide->id](CanvasState &callback_state,
+                                   const int target_artwork_id) {
+              return SeparateImportedArtworkByGuide(
+                  callback_state, target_artwork_id, guide_id);
+            });
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::Separator();
       if (ImGui::MenuItem("Delete guide")) {
         if (state.imported_artwork_separation_preview.active &&
             std::find(
@@ -3141,6 +3459,36 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
                                state.selected_guide_id != 0 ||
                                state.selected_imported_artwork_id != 0 ||
                                !state.selected_imported_elements.empty();
+    const bool can_paste = HasClipboardContent(state);
+    const bool has_imported_artwork = !state.imported_artwork.empty();
+    const bool any_visible_artwork = std::ranges::any_of(
+        state.imported_artwork,
+        [](const ImportedArtwork &artwork) { return artwork.visible; });
+    if (ImGui::MenuItem("Paste", "Ctrl+V", false, can_paste)) {
+      PasteFromClipboard(state);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::Separator();
+    const char *visibility_label =
+        any_visible_artwork ? "Hide All" : "Show All";
+    if (ImGui::MenuItem(visibility_label, nullptr, false,
+                        has_imported_artwork)) {
+      if (any_visible_artwork) {
+        HideAllImportedArtwork(state);
+      } else {
+        ShowAllImportedArtwork(state);
+      }
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Select All", "Ctrl+A", false,
+                        !state.imported_artwork.empty())) {
+      state.selected_working_area_id = 0;
+      state.selected_guide_id = 0;
+      ResetMarqueeInteractionState(&transient_state);
+      SelectAllVisibleImportedArtwork(state);
+      ImGui::CloseCurrentPopup();
+    }
     if (ImGui::MenuItem("Clear Selection", nullptr, false, has_selection)) {
       ClearAllImportedSelection(state);
       state.selected_working_area_id = 0;
@@ -3148,8 +3496,6 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
       ResetMarqueeInteractionState(&transient_state);
       ImGui::CloseCurrentPopup();
     }
-    ImGui::Separator();
-    ImGui::MenuItem("Placeholder", nullptr, false, false);
     ImGui::EndPopup();
   }
 

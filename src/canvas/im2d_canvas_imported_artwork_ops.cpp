@@ -2,6 +2,8 @@
 
 #include "im2d_canvas_document.h"
 #include "im2d_canvas_internal.h"
+#include "im2d_canvas_notification.h"
+#include "im2d_canvas_undo.h"
 
 #include "../common/im2d_log.h"
 #include "../operations/im2d_operations_shared.h"
@@ -2757,6 +2759,7 @@ bool TransformImportedArtwork(CanvasState &state, int imported_artwork_id,
     return false;
   }
 
+  PushUndoSnapshot(state, action_name);
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
 
   const ImVec2 size = detail::ImportedArtworkLocalSize(*artwork);
@@ -2780,6 +2783,191 @@ bool TransformImportedArtwork(CanvasState &state, int imported_artwork_id,
   log::GetLogger()->info("{} imported artwork id={} name='{}'", action_name,
                          artwork->id, artwork->name);
   return true;
+}
+
+int CountImportedElementIds(const std::unordered_set<int> &path_ids,
+                            const std::unordered_set<int> &text_ids) {
+  return static_cast<int>(path_ids.size() + text_ids.size());
+}
+
+bool CollectDebugSelectionElementIds(const CanvasState &state,
+                                     const ImportedArtwork &artwork,
+                                     std::unordered_set<int> *path_ids,
+                                     std::unordered_set<int> *text_ids) {
+  if (path_ids == nullptr || text_ids == nullptr ||
+      state.selected_imported_debug.artwork_id != artwork.id) {
+    return false;
+  }
+
+  switch (state.selected_imported_debug.kind) {
+  case ImportedDebugSelectionKind::Group: {
+    if (FindImportedGroup(artwork, state.selected_imported_debug.item_id) ==
+        nullptr) {
+      return false;
+    }
+    std::unordered_set<int> visited_group_ids;
+    operations::detail::CollectImportedGroupElementIdsShared(
+        artwork, state.selected_imported_debug.item_id, path_ids, text_ids,
+        &visited_group_ids);
+    return CountImportedElementIds(*path_ids, *text_ids) > 0;
+  }
+  case ImportedDebugSelectionKind::Path:
+    if (FindImportedPath(artwork, state.selected_imported_debug.item_id) ==
+        nullptr) {
+      return false;
+    }
+    path_ids->insert(state.selected_imported_debug.item_id);
+    return true;
+  case ImportedDebugSelectionKind::DxfText:
+    if (FindImportedDxfText(artwork, state.selected_imported_debug.item_id) ==
+        nullptr) {
+      return false;
+    }
+    text_ids->insert(state.selected_imported_debug.item_id);
+    return true;
+  case ImportedDebugSelectionKind::Artwork:
+  case ImportedDebugSelectionKind::None:
+    break;
+  }
+  return false;
+}
+
+bool CollectElementClipboardSelection(const CanvasState &state,
+                                      const ImportedArtwork &artwork,
+                                      std::vector<ImportedArtwork> *artworks,
+                                      int *selected_count) {
+  if (artworks == nullptr || selected_count == nullptr) {
+    return false;
+  }
+
+  std::unordered_set<int> path_ids;
+  std::unordered_set<int> text_ids;
+  if (state.selected_imported_artwork_id == artwork.id &&
+      !state.selected_imported_elements.empty()) {
+    for (const ImportedElementSelection &selection :
+         state.selected_imported_elements) {
+      if (selection.kind == ImportedElementKind::Path) {
+        if (FindImportedPath(artwork, selection.item_id) != nullptr) {
+          path_ids.insert(selection.item_id);
+        }
+      } else if (FindImportedDxfText(artwork, selection.item_id) != nullptr) {
+        text_ids.insert(selection.item_id);
+      }
+    }
+  }
+
+  if (path_ids.empty() && text_ids.empty() &&
+      !CollectDebugSelectionElementIds(state, artwork, &path_ids, &text_ids)) {
+    return false;
+  }
+
+  const int element_count = CountImportedElementIds(path_ids, text_ids);
+  if (element_count == 0) {
+    return false;
+  }
+
+  artworks->push_back(BuildArtworkSubset(artwork, path_ids, text_ids, ""));
+  *selected_count = element_count;
+  return true;
+}
+
+bool CollectSelectionForClipboard(const CanvasState &state,
+                                  std::vector<ImportedArtwork> *artworks,
+                                  int *selected_count) {
+  if (artworks == nullptr || selected_count == nullptr) {
+    return false;
+  }
+
+  artworks->clear();
+  *selected_count = 0;
+
+  if (state.selected_imported_artwork_id != 0) {
+    const ImportedArtwork *artwork =
+        FindImportedArtwork(state, state.selected_imported_artwork_id);
+    if (artwork != nullptr && CollectElementClipboardSelection(
+                                  state, *artwork, artworks, selected_count)) {
+      return true;
+    }
+  }
+
+  const std::vector<int> selected_artwork_ids =
+      GetSelectedImportedArtworkObjects(state);
+  if (selected_artwork_ids.empty()) {
+    return false;
+  }
+
+  artworks->reserve(selected_artwork_ids.size());
+  for (const int artwork_id : selected_artwork_ids) {
+    const ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id);
+    if (artwork == nullptr) {
+      continue;
+    }
+    artworks->push_back(*artwork);
+  }
+  *selected_count = static_cast<int>(artworks->size());
+  return !artworks->empty();
+}
+
+ImportedArtworkOperationResult
+DeleteImportedElementsFromArtwork(CanvasState &state,
+                                  const int imported_artwork_id,
+                                  const std::unordered_set<int> &path_ids,
+                                  const std::unordered_set<int> &text_ids) {
+  ImportedArtworkOperationResult result;
+  result.artwork_id = imported_artwork_id;
+
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    result.message = "Imported artwork was not found.";
+    return result;
+  }
+
+  const int deleted_count = CountImportedElementIds(path_ids, text_ids);
+  result.selected_count = deleted_count;
+  if (deleted_count == 0) {
+    PopulateOperationReadiness(&result, *artwork);
+    result.message = "No imported elements were selected.";
+    return result;
+  }
+
+  SetLastImportedOperationIssueElements(state, 0, {});
+  ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
+  std::erase_if(artwork->paths, [&path_ids](const ImportedPath &path) {
+    return path_ids.contains(path.id);
+  });
+  std::erase_if(artwork->dxf_text, [&text_ids](const ImportedDxfText &text) {
+    return text_ids.contains(text.id);
+  });
+
+  PruneEmptyGroups(*artwork);
+  ResetImportedArtworkCounters(*artwork);
+  RecomputeImportedArtworkBounds(*artwork);
+  RecomputeImportedHierarchyBounds(*artwork);
+  RefreshImportedArtworkPartMetadata(*artwork);
+
+  const bool source_empty = artwork->paths.empty() && artwork->dxf_text.empty();
+  if (source_empty) {
+    DeleteImportedArtwork(state, imported_artwork_id);
+    ClearSelectedImportedElements(state);
+    ClearImportedDebugSelection(state);
+    result.success = true;
+    result.message =
+        "Deleted " + std::to_string(deleted_count) + " imported element" +
+        (deleted_count == 1 ? std::string() : std::string("s")) + ".";
+    return result;
+  }
+
+  ClearSelectedImportedElements(state);
+  SetSingleSelectedImportedArtworkObject(state, imported_artwork_id);
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                   imported_artwork_id, 0};
+
+  result.success = true;
+  PopulateOperationReadiness(&result, *artwork);
+  result.message =
+      "Deleted " + std::to_string(deleted_count) + " imported element" +
+      (deleted_count == 1 ? std::string() : std::string("s")) + ".";
+  return result;
 }
 
 } // namespace
@@ -2880,6 +3068,133 @@ ImportedArtworkOperationResult ApplyImportedArtworkOperationToSelection(
   return aggregate;
 }
 
+bool HideAllImportedArtwork(CanvasState &state) {
+  if (state.imported_artwork.empty()) {
+    state.last_imported_artwork_operation = {
+        .success = false,
+        .message = "No imported artwork is available.",
+    };
+    return false;
+  }
+
+  ScopedUndoTransaction undo_transaction(state, "Hide all imported artwork");
+  int hidden_count = 0;
+  for (ImportedArtwork &artwork : state.imported_artwork) {
+    if (!artwork.visible) {
+      continue;
+    }
+    artwork.visible = false;
+    ClearImportedArtworkPreviewStatesForArtwork(state, artwork.id);
+    hidden_count += 1;
+  }
+
+  state.last_imported_artwork_operation = {
+      .success = hidden_count > 0,
+      .selected_count = hidden_count,
+      .message = hidden_count > 0 ? "Hidden all imported artwork."
+                                  : "All imported artwork is already hidden.",
+  };
+  return hidden_count > 0;
+}
+
+bool ShowAllImportedArtwork(CanvasState &state) {
+  if (state.imported_artwork.empty()) {
+    state.last_imported_artwork_operation = {
+        .success = false,
+        .message = "No imported artwork is available.",
+    };
+    return false;
+  }
+
+  ScopedUndoTransaction undo_transaction(state, "Show all imported artwork");
+  int shown_count = 0;
+  for (ImportedArtwork &artwork : state.imported_artwork) {
+    if (artwork.visible) {
+      continue;
+    }
+    artwork.visible = true;
+    shown_count += 1;
+  }
+
+  state.last_imported_artwork_operation = {
+      .success = shown_count > 0,
+      .selected_count = shown_count,
+      .message = shown_count > 0 ? "Showing all imported artwork."
+                                 : "All imported artwork is already visible.",
+  };
+  return shown_count > 0;
+}
+
+bool HideSelectedImportedArtwork(CanvasState &state) {
+  const std::vector<int> target_artwork_ids =
+      ResolveImportedArtworkOperationTargets(
+          state, state.selected_imported_artwork_id);
+  if (target_artwork_ids.empty()) {
+    state.last_imported_artwork_operation = {
+        .success = false,
+        .message = "Select one or more imported artworks.",
+    };
+    return false;
+  }
+
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Hide selected imported artwork");
+  int hidden_count = 0;
+  for (const int artwork_id : target_artwork_ids) {
+    ImportedArtwork *artwork = FindImportedArtwork(state, artwork_id);
+    if (artwork == nullptr || !artwork->visible) {
+      continue;
+    }
+    artwork->visible = false;
+    ClearImportedArtworkPreviewStatesForArtwork(state, artwork_id);
+    hidden_count += 1;
+  }
+
+  state.last_imported_artwork_operation = {
+      .success = hidden_count > 0,
+      .selected_count = hidden_count,
+      .message = hidden_count > 0
+                     ? "Hidden selected imported artwork."
+                     : "Selected imported artwork is already hidden.",
+  };
+  return hidden_count > 0;
+}
+
+bool IsolateSelectedImportedArtwork(CanvasState &state) {
+  const std::vector<int> target_artwork_ids =
+      ResolveImportedArtworkOperationTargets(
+          state, state.selected_imported_artwork_id);
+  if (target_artwork_ids.empty()) {
+    state.last_imported_artwork_operation = {
+        .success = false,
+        .message = "Select one or more imported artworks.",
+    };
+    return false;
+  }
+
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Isolate selected imported artwork");
+  const std::unordered_set<int> visible_ids(target_artwork_ids.begin(),
+                                            target_artwork_ids.end());
+  int changed_count = 0;
+  for (ImportedArtwork &artwork : state.imported_artwork) {
+    const bool next_visible = visible_ids.contains(artwork.id);
+    if (artwork.visible == next_visible) {
+      continue;
+    }
+    artwork.visible = next_visible;
+    ClearImportedArtworkPreviewStatesForArtwork(state, artwork.id);
+    changed_count += 1;
+  }
+
+  state.last_imported_artwork_operation = {
+      .success = true,
+      .selected_count = static_cast<int>(target_artwork_ids.size()),
+      .message = "Isolated selected imported artwork.",
+  };
+  return changed_count > 0;
+}
+
 bool FlipImportedArtworkHorizontal(CanvasState &state,
                                    int imported_artwork_id) {
   return TransformImportedArtwork(
@@ -2937,6 +3252,7 @@ AutoCloseImportedArtworkToPolyline(CanvasState &state, int imported_artwork_id,
     return result;
   }
 
+  PushUndoSnapshot(state, "Auto close imported artwork");
   SetLastImportedOperationIssueElements(state, 0, {});
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   AutoCloseImportedArtworkToPolylineInPlace(*artwork, weld_tolerance, &result);
@@ -3016,6 +3332,8 @@ AnalyzeImportedArtworkContours(CanvasState &state, int imported_artwork_id) {
                    std::to_string(result.hole_count) + ", orphan holes " +
                    std::to_string(result.orphan_hole_count) + ".";
   SetLastImportedArtworkOperation(state, result);
+  ShowCanvasNotification(state, "Contour Analysis Ready", result.message,
+                         CanvasNotificationDismissMode::UserClosable);
   return result;
 }
 
@@ -3032,6 +3350,7 @@ RepairImportedArtworkOrphanHoles(CanvasState &state, int imported_artwork_id) {
     return result;
   }
 
+  PushUndoSnapshot(state, "Repair imported artwork orphan holes");
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   RefreshImportedArtworkPartMetadata(*artwork);
 
@@ -3182,6 +3501,7 @@ ImportedArtworkOperationResult PrepareImportedArtworkForCutting(
     CanvasState &state, int imported_artwork_id, float weld_tolerance,
     ImportedArtworkPrepareMode mode, bool auto_close_to_polyline) {
   if (FindImportedArtwork(state, imported_artwork_id) != nullptr) {
+    PushUndoSnapshot(state, "Prepare imported artwork for cutting");
     ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   }
 
@@ -3569,6 +3889,7 @@ PreviewSeparateImportedArtworkByGuide(CanvasState &state,
 
   GuideSplitPreviewPlan plan =
       BuildGuideSplitPreviewPlan(*artwork, state, guide_id);
+  ClearImportedArtworkAutoCutPreviewState(state);
   state.imported_artwork_separation_preview.active = true;
   state.imported_artwork_separation_preview.artwork_id = imported_artwork_id;
   state.imported_artwork_separation_preview.guide_id = guide_id;
@@ -3655,6 +3976,7 @@ PreviewImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
     return result;
   }
 
+  ClearImportedArtworkSeparationPreviewState(state);
   state.imported_artwork_auto_cut_preview.active = true;
   state.imported_artwork_auto_cut_preview.artwork_id = imported_artwork_id;
   state.imported_artwork_auto_cut_preview.axis_mode = axis_mode;
@@ -3735,6 +4057,8 @@ ApplyImportedArtworkAutoCut(CanvasState &state, int imported_artwork_id,
     return result;
   }
 
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Apply imported artwork auto cut");
   result = MoveImportedElementsToNewArtworks(state, imported_artwork_id,
                                              plan.buckets, " Auto Cut", "Cut",
                                              create_groups_from_cuts);
@@ -3756,8 +4080,244 @@ void ClearImportedArtworkAutoCutPreview(CanvasState &state) {
   ClearImportedArtworkAutoCutPreviewState(state);
 }
 
+bool CanCopySelectionToClipboard(const CanvasState &state) {
+  std::vector<ImportedArtwork> clipboard_artworks;
+  int selected_count = 0;
+  return CollectSelectionForClipboard(state, &clipboard_artworks,
+                                      &selected_count);
+}
+
+bool HasClipboardContent(const CanvasState &state) {
+  return state.clipboard.has_content();
+}
+
+ImportedArtworkOperationResult CopySelectedToClipboard(CanvasState &state) {
+  ImportedArtworkOperationResult result;
+
+  std::vector<ImportedArtwork> clipboard_artworks;
+  int selected_count = 0;
+  if (!CollectSelectionForClipboard(state, &clipboard_artworks,
+                                    &selected_count)) {
+    result.message = "Select imported artwork or imported elements to copy.";
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  state.clipboard.artworks = std::move(clipboard_artworks);
+  state.clipboard.paste_generation = 0;
+  result.success = true;
+  result.selected_count = selected_count;
+  result.message = "Copied " + std::to_string(selected_count) +
+                   (state.clipboard.artworks.size() == 1 && selected_count > 1
+                        ? " imported element"
+                        : " imported object") +
+                   (selected_count == 1 ? std::string() : std::string("s")) +
+                   " to the clipboard.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult
+DeleteSelectedImportedContent(CanvasState &state) {
+  ImportedArtworkOperationResult result;
+
+  if (state.selected_imported_artwork_id != 0) {
+    if (ImportedArtwork *artwork =
+            FindImportedArtwork(state, state.selected_imported_artwork_id);
+        artwork != nullptr) {
+      std::unordered_set<int> path_ids;
+      std::unordered_set<int> text_ids;
+      if (state.selected_imported_artwork_id == artwork->id &&
+          !state.selected_imported_elements.empty()) {
+        for (const ImportedElementSelection &selection :
+             state.selected_imported_elements) {
+          if (selection.kind == ImportedElementKind::Path) {
+            if (FindImportedPath(*artwork, selection.item_id) != nullptr) {
+              path_ids.insert(selection.item_id);
+            }
+          } else if (FindImportedDxfText(*artwork, selection.item_id) !=
+                     nullptr) {
+            text_ids.insert(selection.item_id);
+          }
+        }
+      }
+
+      if ((path_ids.empty() && text_ids.empty()) &&
+          CollectDebugSelectionElementIds(state, *artwork, &path_ids,
+                                          &text_ids)) {
+        ScopedUndoTransaction undo_transaction(
+            state, "Delete selected imported elements");
+        result = DeleteImportedElementsFromArtwork(state, artwork->id, path_ids,
+                                                   text_ids);
+        SetLastImportedArtworkOperation(state, result);
+        return result;
+      }
+    }
+  }
+
+  const std::vector<int> target_artwork_ids =
+      GetSelectedImportedArtworkObjects(state);
+  if (target_artwork_ids.empty()) {
+    result.message = "Select imported artwork or imported elements to delete.";
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Delete selected imported artwork");
+  int deleted_count = 0;
+  for (const int artwork_id : target_artwork_ids) {
+    if (operations::detail::DeleteImportedArtworkShared(state, artwork_id)) {
+      deleted_count += 1;
+    }
+  }
+
+  result.success = deleted_count > 0;
+  result.selected_count = deleted_count;
+  result.message =
+      deleted_count > 0
+          ? "Deleted " + std::to_string(deleted_count) + " imported object" +
+                (deleted_count == 1 ? std::string() : std::string("s")) + "."
+          : "No imported artwork was deleted.";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
+ImportedArtworkOperationResult CutSelectedToClipboard(CanvasState &state) {
+  ImportedArtworkOperationResult copy_result = CopySelectedToClipboard(state);
+  if (!copy_result.success) {
+    return copy_result;
+  }
+
+  ImportedArtworkOperationResult delete_result =
+      DeleteSelectedImportedContent(state);
+  if (!delete_result.success) {
+    return delete_result;
+  }
+
+  delete_result.message = "Cut selection to the clipboard.";
+  SetLastImportedArtworkOperation(state, delete_result);
+  return delete_result;
+}
+
+namespace {
+
+bool TryGetClipboardWorldBounds(const CanvasClipboard &clipboard,
+                                ImVec2 *world_min, ImVec2 *world_max) {
+  if (world_min == nullptr || world_max == nullptr ||
+      clipboard.artworks.empty()) {
+    return false;
+  }
+
+  bool has_bounds = false;
+  for (const ImportedArtwork &artwork : clipboard.artworks) {
+    ImVec2 artwork_world_min;
+    ImVec2 artwork_world_max;
+    ImportedLocalBoundsToWorldBounds(artwork, artwork.bounds_min,
+                                     artwork.bounds_max, &artwork_world_min,
+                                     &artwork_world_max);
+    if (!has_bounds) {
+      *world_min = artwork_world_min;
+      *world_max = artwork_world_max;
+      has_bounds = true;
+      continue;
+    }
+
+    world_min->x = std::min(world_min->x, artwork_world_min.x);
+    world_min->y = std::min(world_min->y, artwork_world_min.y);
+    world_max->x = std::max(world_max->x, artwork_world_max.x);
+    world_max->y = std::max(world_max->y, artwork_world_max.y);
+  }
+
+  return has_bounds;
+}
+
+} // namespace
+
+ImportedArtworkOperationResult PasteFromClipboard(CanvasState &state) {
+  ImportedArtworkOperationResult result;
+  if (!state.clipboard.has_content()) {
+    result.message = "Clipboard is empty.";
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ScopedUndoTransaction undo_transaction(state, "Paste imported artwork");
+  state.clipboard.paste_generation += 1;
+  const float offset =
+      24.0f * static_cast<float>(state.clipboard.paste_generation);
+  ImVec2 translation(offset, offset);
+  ImVec2 clipboard_world_min;
+  ImVec2 clipboard_world_max;
+  if (state.runtime.has_cursor_world &&
+      TryGetClipboardWorldBounds(state.clipboard, &clipboard_world_min,
+                                 &clipboard_world_max)) {
+    const ImVec2 clipboard_center(
+        (clipboard_world_min.x + clipboard_world_max.x) * 0.5f,
+        (clipboard_world_min.y + clipboard_world_max.y) * 0.5f);
+    translation = ImVec2(state.runtime.cursor_world.x - clipboard_center.x,
+                         state.runtime.cursor_world.y - clipboard_center.y);
+  }
+
+  std::vector<int> pasted_artwork_ids;
+  pasted_artwork_ids.reserve(state.clipboard.artworks.size());
+  for (ImportedArtwork source_artwork : state.clipboard.artworks) {
+    source_artwork.id = 0;
+    source_artwork.part.part_id = 0;
+    source_artwork.origin.x += translation.x;
+    source_artwork.origin.y += translation.y;
+
+    const std::string original_name = source_artwork.name;
+    if (!original_name.empty() &&
+        original_name.find("Copy") == std::string::npos) {
+      source_artwork.name = original_name + " Copy";
+      if (ImportedGroup *root_group =
+              FindImportedGroup(source_artwork, source_artwork.root_group_id);
+          root_group != nullptr) {
+        root_group->label = source_artwork.name;
+      }
+    }
+
+    const int pasted_artwork_id =
+        AppendImportedArtwork(state, std::move(source_artwork), false);
+    if (pasted_artwork_id != 0) {
+      pasted_artwork_ids.push_back(pasted_artwork_id);
+    }
+  }
+
+  if (pasted_artwork_ids.empty()) {
+    result.message = "Clipboard contents could not be pasted.";
+    SetLastImportedArtworkOperation(state, result);
+    return result;
+  }
+
+  ClearSelectedImportedElements(state);
+  state.selected_imported_artwork_ids = pasted_artwork_ids;
+  state.selected_imported_artwork_id = pasted_artwork_ids.front();
+  state.selected_imported_debug = {ImportedDebugSelectionKind::Artwork,
+                                   state.selected_imported_artwork_id, 0};
+
+  result.success = true;
+  result.selected_count = static_cast<int>(pasted_artwork_ids.size());
+  result.artwork_id = state.selected_imported_artwork_id;
+  result.created_artwork_id = state.selected_imported_artwork_id;
+  if (const ImportedArtwork *artwork =
+          FindImportedArtwork(state, state.selected_imported_artwork_id);
+      artwork != nullptr) {
+    PopulateOperationReadiness(&result, *artwork);
+  }
+  result.message =
+      "Pasted " + std::to_string(pasted_artwork_ids.size()) +
+      " imported object" +
+      (pasted_artwork_ids.size() == 1 ? std::string() : std::string("s")) + ".";
+  SetLastImportedArtworkOperation(state, result);
+  return result;
+}
+
 ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Extract selected imported elements");
   return operations::detail::ExtractSelectedImportedElementsShared(
       state, imported_artwork_id,
       [](CanvasState &callback_state, int callback_artwork_id,
@@ -3826,6 +4386,8 @@ GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id) {
     return result;
   }
 
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Group selected imported elements");
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   SetLastImportedOperationIssueElements(state, 0, {});
 
@@ -3896,6 +4458,8 @@ GroupImportedArtworkRootContents(CanvasState &state, int imported_artwork_id) {
     return result;
   }
 
+  ScopedUndoTransaction undo_transaction(
+      state, "Group imported artwork root contents");
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   SetLastImportedOperationIssueElements(state, 0, {});
 
@@ -3955,6 +4519,8 @@ GroupSelectedImportedArtworkObjects(CanvasState &state) {
     source_artworks.push_back(artwork);
   }
 
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Group selected imported artwork");
   SetLastImportedOperationIssueElements(state, 0, {});
   ImportedArtwork grouped_artwork =
       BuildArtworkGroupFromSelection(source_artworks);
@@ -4025,6 +4591,8 @@ UngroupSelectedImportedArtworkObjects(CanvasState &state) {
   if (HasSingleWrappedTopLevelImportedGroup(*artwork)) {
     const int wrapped_group_id = root_group->child_group_ids.front();
 
+    ScopedUndoTransaction undo_transaction(state,
+                                           "Ungroup imported artwork contents");
     ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
     SetLastImportedOperationIssueElements(state, 0, {});
     if (!UngroupImportedGroupInPlace(artwork, wrapped_group_id)) {
@@ -4095,6 +4663,8 @@ UngroupSelectedImportedArtworkObjects(CanvasState &state) {
     return result;
   }
 
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Ungroup selected imported artwork");
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   SetLastImportedOperationIssueElements(state, 0, {});
 
@@ -4181,6 +4751,7 @@ UngroupSelectedImportedGroup(CanvasState &state, int imported_artwork_id) {
   const int ungrouped_item_count =
       static_cast<int>(group->path_ids.size() + group->dxf_text_ids.size());
 
+  ScopedUndoTransaction undo_transaction(state, "Ungroup imported group");
   ClearImportedArtworkPreviewStatesForArtwork(state, imported_artwork_id);
   SetLastImportedOperationIssueElements(state, 0, {});
   if (!UngroupImportedGroupInPlace(artwork, group_id)) {
@@ -4236,6 +4807,8 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
     return result;
   }
 
+  ScopedUndoTransaction undo_transaction(state,
+                                         "Separate imported artwork by guide");
   result = MoveImportedElementsToNewArtworks(state, imported_artwork_id,
                                              plan.buckets, " Guide Split",
                                              "Split", create_groups_from_cuts);
@@ -4254,6 +4827,10 @@ SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
 }
 
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id) {
+  if (FindImportedArtwork(state, imported_artwork_id) == nullptr) {
+    return false;
+  }
+  PushUndoSnapshot(state, "Delete imported artwork");
   return operations::detail::DeleteImportedArtworkShared(state,
                                                          imported_artwork_id);
 }

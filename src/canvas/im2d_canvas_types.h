@@ -112,6 +112,8 @@ struct CanvasRuntimeInfo {
   ImVec2 total_max = ImVec2(0.0f, 0.0f);
   ImVec2 canvas_min = ImVec2(0.0f, 0.0f);
   ImVec2 canvas_max = ImVec2(0.0f, 0.0f);
+  bool has_cursor_world = false;
+  ImVec2 cursor_world = ImVec2(0.0f, 0.0f);
 };
 
 struct GridSettings {
@@ -346,6 +348,22 @@ enum class ImportedArtworkPrepareMode {
   AggressiveCleanup,
 };
 
+enum class CanvasNotificationDismissMode {
+  CallerManaged,
+  UserClosable,
+};
+
+using CanvasNotificationId = uint8_t;
+
+struct CanvasNotificationState {
+  bool active = false;
+  CanvasNotificationId id = 0;
+  CanvasNotificationDismissMode dismiss_mode =
+      CanvasNotificationDismissMode::CallerManaged;
+  std::string title;
+  std::string summary;
+};
+
 struct ImportedArtworkOperationResult {
   bool success = false;
   int artwork_id = 0;
@@ -518,6 +536,34 @@ struct ImportedArtwork {
   uint32_t flags = kDefaultImportedArtworkFlags;
 };
 
+struct CanvasClipboard {
+  std::vector<ImportedArtwork> artworks;
+  int paste_generation = 0;
+
+  [[nodiscard]] bool has_content() const { return !artworks.empty(); }
+};
+
+struct CanvasUndoSnapshot {
+  std::vector<ImportedArtwork> imported_artwork;
+  int selected_imported_artwork_id = 0;
+  std::vector<int> selected_imported_artwork_ids;
+  ImportedDebugSelection selected_imported_debug;
+  ImportedArtworkSelectionScope selection_scope =
+      ImportedArtworkSelectionScope::Canvas;
+  ImportedArtworkEditMode imported_artwork_edit_mode =
+      ImportedArtworkEditMode::None;
+  std::vector<ImportedElementSelection> selected_imported_elements;
+  int next_imported_artwork_id = 1;
+  int next_imported_part_id = 1;
+};
+
+struct UndoHistory {
+  std::vector<CanvasUndoSnapshot> undo_stack;
+  std::vector<CanvasUndoSnapshot> redo_stack;
+  std::size_t max_snapshots = 50;
+  int transaction_depth = 0;
+};
+
 struct ImportedIssueOverlaySettings {
   bool show_open_geometry = true;
   bool show_placeholder_text = true;
@@ -551,8 +597,11 @@ struct CanvasState {
   ImportedArtworkEditMode imported_artwork_edit_mode =
       ImportedArtworkEditMode::None;
   std::vector<ImportedElementSelection> selected_imported_elements;
+  CanvasClipboard clipboard;
+  UndoHistory undo_history;
   ImportedArtworkSeparationPreview imported_artwork_separation_preview;
   ImportedArtworkAutoCutPreview imported_artwork_auto_cut_preview;
+  CanvasNotificationState canvas_notification;
   ImportedArtworkOperationResult last_imported_artwork_operation;
   int last_imported_operation_issue_artwork_id = 0;
   bool highlight_last_imported_operation_issue_elements = false;

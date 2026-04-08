@@ -16,6 +16,10 @@ ImportedArtworkOperationResult ApplyImportedArtworkOperationToSelection(
     CanvasState &state, int fallback_artwork_id, const char *operation_name,
     const std::function<ImportedArtworkOperationResult(CanvasState &, int)>
         &operation);
+bool HideAllImportedArtwork(CanvasState &state);
+bool ShowAllImportedArtwork(CanvasState &state);
+bool HideSelectedImportedArtwork(CanvasState &state);
+bool IsolateSelectedImportedArtwork(CanvasState &state);
 bool FlipImportedArtworkHorizontal(CanvasState &state, int imported_artwork_id);
 bool FlipImportedArtworkVertical(CanvasState &state, int imported_artwork_id);
 bool RotateImportedArtworkClockwise(CanvasState &state,
@@ -68,6 +72,11 @@ ImportedArtworkOperationResult ApplyImportedArtworkAutoCut(
 void ClearImportedArtworkAutoCutPreview(CanvasState &state);
 ImportedArtworkOperationResult
 ExtractSelectedImportedElements(CanvasState &state, int imported_artwork_id);
+bool CanCopySelectionToClipboard(const CanvasState &state);
+bool HasClipboardContent(const CanvasState &state);
+ImportedArtworkOperationResult CopySelectedToClipboard(CanvasState &state);
+ImportedArtworkOperationResult CutSelectedToClipboard(CanvasState &state);
+ImportedArtworkOperationResult PasteFromClipboard(CanvasState &state);
 ImportedArtworkOperationResult
 GroupSelectedImportedElements(CanvasState &state, int imported_artwork_id);
 ImportedArtworkOperationResult
@@ -82,6 +91,8 @@ ImportedArtworkOperationResult
 SeparateImportedArtworkByGuide(CanvasState &state, int imported_artwork_id,
                                int guide_id,
                                bool create_groups_from_cuts = false);
+ImportedArtworkOperationResult
+DeleteSelectedImportedContent(CanvasState &state);
 bool DeleteImportedArtwork(CanvasState &state, int imported_artwork_id);
 
 } // namespace im2d

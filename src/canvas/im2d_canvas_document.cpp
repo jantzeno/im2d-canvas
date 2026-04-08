@@ -1,6 +1,7 @@
 #include "im2d_canvas_document.h"
 
 #include "im2d_canvas_internal.h"
+#include "im2d_canvas_undo.h"
 
 #include <clipper2/clipper.h>
 
@@ -673,6 +674,7 @@ int AddWorkingArea(CanvasState &state,
 
 int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
                           bool auto_place) {
+  PushUndoSnapshot(state, "Append imported artwork");
   artwork.id = state.next_imported_artwork_id++;
   if (artwork.name.empty()) {
     artwork.name = "Artwork " + std::to_string(artwork.id);
@@ -701,12 +703,46 @@ int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
 }
 
 void ClearImportedArtwork(CanvasState &state) {
+  PushUndoSnapshot(state, "Clear imported artwork");
   state.imported_artwork.clear();
   state.imported_artwork_separation_preview = {};
   state.imported_artwork_auto_cut_preview = {};
   ClearSelectedImportedArtworkObjects(state);
   ClearImportedDebugSelection(state);
   ClearSelectedImportedElements(state);
+}
+
+bool RenameImportedArtwork(CanvasState &state, const int imported_artwork_id,
+                           const std::string_view name) {
+  ImportedArtwork *artwork = FindImportedArtwork(state, imported_artwork_id);
+  if (artwork == nullptr) {
+    state.last_imported_artwork_operation = {
+        .success = false,
+        .artwork_id = imported_artwork_id,
+        .message = "Imported artwork was not found.",
+    };
+    return false;
+  }
+
+  const std::string renamed_value(name);
+  if (renamed_value.empty() || artwork->name == renamed_value) {
+    return false;
+  }
+
+  PushUndoSnapshot(state, "Rename imported artwork");
+  artwork->name = renamed_value;
+  if (ImportedGroup *root_group =
+          FindImportedGroup(*artwork, artwork->root_group_id);
+      root_group != nullptr) {
+    root_group->label = artwork->name;
+  }
+
+  state.last_imported_artwork_operation = {
+      .success = true,
+      .artwork_id = imported_artwork_id,
+      .message = "Renamed imported artwork to '" + artwork->name + "'.",
+  };
+  return true;
 }
 
 void RecomputeImportedArtworkBounds(ImportedArtwork &artwork) {

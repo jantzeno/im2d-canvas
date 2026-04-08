@@ -2,6 +2,8 @@
 
 #include "im2d_canvas_types.h"
 
+#include <string_view>
+
 namespace im2d {
 
 void InitializeDefaultDocument(CanvasState &state,
@@ -11,6 +13,8 @@ int AddWorkingArea(CanvasState &state,
 int AppendImportedArtwork(CanvasState &state, ImportedArtwork artwork,
                           bool auto_place = true);
 void ClearImportedArtwork(CanvasState &state);
+bool RenameImportedArtwork(CanvasState &state, int imported_artwork_id,
+                           std::string_view name);
 void ClearImportedDebugSelection(CanvasState &state);
 void ClearSelectedImportedArtworkObjects(CanvasState &state);
 void ClearSelectedImportedElements(CanvasState &state);
