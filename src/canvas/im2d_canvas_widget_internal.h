@@ -1,5 +1,6 @@
 #pragma once
 
+#include "im2d_canvas_editor.h"
 #include "im2d_canvas_types.h"
 
 #include <imgui.h>
@@ -41,6 +42,7 @@ struct TransientCanvasState {
   int dragging_guide_id = 0;
   int context_guide_id = 0;
   int context_imported_artwork_id = 0;
+  CanvasEditor canvas_editor;
   std::vector<ImportedArtworkDragSnapshot> dragging_imported_artwork;
   std::vector<ImportedArtworkResizeSnapshot> resizing_imported_artwork_group;
   int dragging_imported_artwork_anchor_id = 0;

@@ -77,6 +77,12 @@ struct ImportedIssueOverlaySettings {
   bool show_ambiguous_cleanup = true;
 };
 
+struct ImportedArtworkToolSettings {
+  AutoCutPreviewAxisMode split_axis = AutoCutPreviewAxisMode::Both;
+  float minimum_gap = 5.0f;
+  float weld_tolerance = 0.5f;
+};
+
 struct CanvasState {
   CanvasTheme theme;
   GridSettings grid;
@@ -105,6 +111,7 @@ struct CanvasState {
   std::vector<ImportedElementSelection> selected_imported_elements;
   CanvasClipboard clipboard;
   UndoHistory undo_history;
+  ImportedArtworkToolSettings imported_artwork_tool_settings;
   ImportedArtworkSeparationPreview imported_artwork_separation_preview;
   ImportedArtworkAutoCutPreview imported_artwork_auto_cut_preview;
   CanvasNotificationState canvas_notification;

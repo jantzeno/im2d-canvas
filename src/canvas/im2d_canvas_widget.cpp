@@ -12,30 +12,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <limits>
 #include <string>
 
 #include <imgui_internal.h>
 
 namespace im2d {
-
-using detail::ActiveCanvasNotification;
-using detail::ActiveCanvasNotificationContent;
-using detail::ClampZoom;
-using detail::ClearActiveCanvasManipulation;
-using detail::GetTransientCanvasState;
-using detail::ImportedArtworkHit;
-using detail::ImportedArtworkHitZone;
-using detail::ImportedPathHit;
-using detail::IsMarqueeInteractionActive;
-using detail::IsMarqueeInteractionArmed;
-using detail::IsMarqueeInteractionSelecting;
-using detail::ResetMarqueeInteractionState;
-using detail::ScreenToWorld;
-using detail::TransientCanvasState;
-using detail::WorkingAreaHit;
-using detail::WorkingAreaHitZone;
-using detail::WorldToScreen;
 
 namespace {
 
@@ -1057,21 +1038,10 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
           HasUngroupableImportedDebugSelection(state, *artwork);
       const bool can_ungroup = can_ungroup_artworks || can_ungroup_debug;
       const bool has_preview =
-          (state.imported_artwork_separation_preview.active &&
-           state.imported_artwork_separation_preview.artwork_id ==
-               artwork->id) ||
-          (state.imported_artwork_auto_cut_preview.active &&
-           state.imported_artwork_auto_cut_preview.artwork_id == artwork->id);
-      const bool can_apply_auto_split =
-          state.imported_artwork_auto_cut_preview.active &&
-          state.imported_artwork_auto_cut_preview.artwork_id == artwork->id &&
-          state.imported_artwork_auto_cut_preview.future_band_count > 1;
-      const float minimum_gap =
-          state.imported_artwork_auto_cut_preview.active &&
-                  state.imported_artwork_auto_cut_preview.artwork_id ==
-                      artwork->id
-              ? state.imported_artwork_auto_cut_preview.minimum_gap
-              : 5.0f;
+          CanvasEditor::HasArtworkPreview(state, artwork->id);
+      const bool any_hidden_artwork = std::ranges::any_of(
+          state.imported_artwork,
+          [](const ImportedArtwork &candidate) { return !candidate.visible; });
 
       if (ImGui::MenuItem("Cut", "Ctrl+X", false, can_copy)) {
         CutSelectedToClipboard(state);
@@ -1184,12 +1154,16 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
         ImGui::CloseCurrentPopup();
       }
       ImGui::Separator();
-      if (ImGui::MenuItem("Hide Selected")) {
+      if (ImGui::MenuItem("Hide Selected", "H")) {
         HideSelectedImportedArtwork(state);
         ImGui::CloseCurrentPopup();
       }
-      if (ImGui::MenuItem("Isolate")) {
+      if (ImGui::MenuItem("Isolate", "I")) {
         IsolateSelectedImportedArtwork(state);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Show All", "Shift+H", false, any_hidden_artwork)) {
+        ShowAllImportedArtwork(state);
         ImGui::CloseCurrentPopup();
       }
       ImGui::Separator();
@@ -1202,59 +1176,29 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
             });
         ImGui::CloseCurrentPopup();
       }
-      if (ImGui::BeginMenu("Repair")) {
-        if (ImGui::MenuItem("Join Open Segments")) {
-          ApplyImportedArtworkOperationToSelection(
-              state, artwork->id, "Join Open Segments",
-              [](CanvasState &callback_state, const int target_artwork_id) {
-                return JoinImportedArtworkOpenSegments(callback_state,
-                                                       target_artwork_id);
-              });
-          ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::MenuItem("Repair Orphan Holes")) {
-          ApplyImportedArtworkOperationToSelection(
-              state, artwork->id, "Repair Orphan Holes",
-              [](CanvasState &callback_state, const int target_artwork_id) {
-                return RepairImportedArtworkOrphanHoles(callback_state,
-                                                        target_artwork_id);
-              });
-          ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndMenu();
-      }
-      ImGui::Separator();
-      if (ImGui::MenuItem("Clear Preview", nullptr, false, has_preview)) {
-        ClearImportedArtworkSeparationPreview(state);
-        ClearImportedArtworkAutoCutPreview(state);
+      if (ImGui::MenuItem("Repair Orphan Holes")) {
+        ApplyImportedArtworkOperationToSelection(
+            state, artwork->id, "Repair Orphan Holes",
+            [](CanvasState &callback_state, const int target_artwork_id) {
+              return RepairImportedArtworkOrphanHoles(callback_state,
+                                                      target_artwork_id);
+            });
         ImGui::CloseCurrentPopup();
       }
-      if (ImGui::BeginMenu("Preview Auto-Split")) {
-        if (ImGui::MenuItem("Horizontal")) {
-          PreviewImportedArtworkAutoCut(state, artwork->id,
-                                        AutoCutPreviewAxisMode::HorizontalOnly,
-                                        minimum_gap);
-          ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::MenuItem("Vertical")) {
-          PreviewImportedArtworkAutoCut(state, artwork->id,
-                                        AutoCutPreviewAxisMode::VerticalOnly,
-                                        minimum_gap);
-          ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::MenuItem("Both")) {
-          PreviewImportedArtworkAutoCut(
-              state, artwork->id, AutoCutPreviewAxisMode::Both, minimum_gap);
-          ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndMenu();
-      }
-      if (ImGui::MenuItem("Apply Auto-Split", nullptr, false,
-                          can_apply_auto_split)) {
-        ApplyImportedArtworkAutoCut(
-            state, artwork->id,
-            state.imported_artwork_auto_cut_preview.axis_mode, minimum_gap);
+      if (ImGui::MenuItem("Weld...")) {
+        transient.canvas_editor.OpenWeld(artwork->id);
         ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Split...")) {
+        transient.canvas_editor.OpenSplit(artwork->id);
+        ImGui::CloseCurrentPopup();
+      }
+      if (has_preview) {
+        ImGui::Separator();
+        if (ImGui::MenuItem("Clear Preview")) {
+          CanvasEditor::ClearPreviewStateForArtwork(state, artwork->id);
+          ImGui::CloseCurrentPopup();
+        }
       }
       ImGui::Separator();
       if (ImGui::MenuItem("Delete", "Delete")) {
@@ -1270,6 +1214,8 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
     }
     ImGui::EndPopup();
   }
+
+  transient.canvas_editor.Draw(state);
 
   if (ImGui::BeginPopup("guide_context_menu")) {
     if (Guide *guide = FindGuide(state, transient.context_guide_id);
@@ -1349,6 +1295,43 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
     if (ImGui::MenuItem("Paste", "Ctrl+V", false, can_paste)) {
       PasteFromClipboard(state);
       ImGui::CloseCurrentPopup();
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Canvas Scope", nullptr,
+                        state.selection_scope ==
+                            ImportedArtworkSelectionScope::Canvas)) {
+      ApplyImportedArtworkSelectionScope(state,
+                                         ImportedArtworkSelectionScope::Canvas);
+      ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::MenuItem("Object Scope", nullptr,
+                        state.selection_scope ==
+                            ImportedArtworkSelectionScope::Object)) {
+      ApplyImportedArtworkSelectionScope(state,
+                                         ImportedArtworkSelectionScope::Object);
+      ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::BeginMenu("Selection Tool")) {
+      if (ImGui::MenuItem("Pointer", nullptr,
+                          state.imported_artwork_edit_mode ==
+                              ImportedArtworkEditMode::None)) {
+        state.imported_artwork_edit_mode = ImportedArtworkEditMode::None;
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Rectangle", nullptr,
+                          state.imported_artwork_edit_mode ==
+                              ImportedArtworkEditMode::SelectRectangle)) {
+        state.imported_artwork_edit_mode =
+            ImportedArtworkEditMode::SelectRectangle;
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Oval", nullptr,
+                          state.imported_artwork_edit_mode ==
+                              ImportedArtworkEditMode::SelectOval)) {
+        state.imported_artwork_edit_mode = ImportedArtworkEditMode::SelectOval;
+        ImGui::CloseCurrentPopup();
+      }
+      ImGui::EndMenu();
     }
     ImGui::Separator();
     const char *visibility_label =
@@ -1464,7 +1447,13 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
   const bool any_popup_open =
       ImGui::IsPopupOpen(nullptr, ImGuiPopupFlags_AnyPopupId);
 
-  const bool canvas_hovered = canvas_rect.Contains(io.MousePos);
+  const bool canvas_window_hovered =
+      ImGui::IsWindowHovered(ImGuiHoveredFlags_RootAndChildWindows);
+  const bool another_window_hovered =
+      ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) &&
+      !canvas_window_hovered;
+  const bool canvas_hovered =
+      canvas_rect.Contains(io.MousePos) && !another_window_hovered;
   const ActiveCanvasNotificationContent notification_content =
       BuildActiveCanvasNotificationContent(state);
   const ActiveCanvasNotification active_notification =
@@ -1514,8 +1503,10 @@ bool DrawCanvas(CanvasState &state, const CanvasWidgetOptions &options) {
     state.runtime.cursor_world =
         ScreenToWorld(state, canvas_rect.Min, io.MousePos);
   }
-  const bool top_ruler_hovered = top_ruler_rect.Contains(io.MousePos);
-  const bool left_ruler_hovered = left_ruler_rect.Contains(io.MousePos);
+  const bool top_ruler_hovered =
+      top_ruler_rect.Contains(io.MousePos) && !another_window_hovered;
+  const bool left_ruler_hovered =
+      left_ruler_rect.Contains(io.MousePos) && !another_window_hovered;
   const ImportedArtworkHit imported_artwork_hit =
       canvas_input_hovered
           ? FindHoveredImportedArtwork(state, canvas_rect.Min, canvas_rect,
