@@ -36,6 +36,7 @@ namespace {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kEpsilon = 1e-6;
+constexpr double kSvgPixelsPerMillimeter = 96.0 / 25.4;
 constexpr int kMaxImported3dFaces = 20000;
 constexpr int kPolylineFlagClosed = 0x01;
 constexpr int kPolylineFlagPolyfaceMesh = 0x40;
@@ -86,6 +87,97 @@ double NormalizeArcDelta(double start_angle, double end_angle) {
     delta += 2.0 * kPi;
   }
   return delta;
+}
+
+bool TryGetHeaderInt(const DRW_Header &header, std::string_view key,
+                     int *value) {
+  const auto iterator = header.vars.find(std::string(key));
+  if (iterator == header.vars.end() || iterator->second == nullptr ||
+      value == nullptr) {
+    return false;
+  }
+
+  const DRW_Variant &variant = *iterator->second;
+  if (variant.type() == DRW_Variant::INTEGER) {
+    *value = variant.content.i;
+    return true;
+  }
+  if (variant.type() == DRW_Variant::DOUBLE) {
+    *value = static_cast<int>(std::lround(variant.content.d));
+    return true;
+  }
+  return false;
+}
+
+double DxfUnitToMillimeters(int unit) {
+  switch (unit) {
+  case DRW_Header::Inch:
+    return 25.4;
+  case DRW_Header::Foot:
+    return 304.8;
+  case DRW_Header::Mile:
+    return 1609344.0;
+  case DRW_Header::Millimeter:
+    return 1.0;
+  case DRW_Header::Centimeter:
+    return 10.0;
+  case DRW_Header::Meter:
+    return 1000.0;
+  case DRW_Header::Kilometer:
+    return 1000000.0;
+  case DRW_Header::Microinch:
+    return 25.4e-6;
+  case DRW_Header::Mil:
+    return 25.4e-3;
+  case DRW_Header::Yard:
+    return 914.4;
+  case DRW_Header::Angstrom:
+    return 1.0e-7;
+  case DRW_Header::Nanometer:
+    return 1.0e-6;
+  case DRW_Header::Micron:
+    return 1.0e-3;
+  case DRW_Header::Decimeter:
+    return 100.0;
+  case DRW_Header::Decameter:
+    return 10000.0;
+  case DRW_Header::Hectometer:
+    return 100000.0;
+  case DRW_Header::Gigameter:
+    return 1.0e12;
+  case DRW_Header::Astro:
+    return 1.495978707e14;
+  case DRW_Header::Lightyear:
+    return 9.4607304725808e18;
+  case DRW_Header::Parsec:
+    return 3.08567758149137e19;
+  default:
+    return 0.0;
+  }
+}
+
+double ResolveDxfUnitToSvgPixelsScale(const DRW_Header &header) {
+  int drawing_units = DRW_Header::None;
+  if (TryGetHeaderInt(header, "$INSUNITS", &drawing_units) &&
+      drawing_units > DRW_Header::None &&
+      drawing_units < DRW_Header::UnitCount) {
+    const double millimeters_per_unit = DxfUnitToMillimeters(drawing_units);
+    if (millimeters_per_unit > 0.0) {
+      return millimeters_per_unit * kSvgPixelsPerMillimeter;
+    }
+  }
+
+  int measurement = DRW_Header::English;
+  if (TryGetHeaderInt(header, "$MEASUREMENT", &measurement)) {
+    if (measurement == DRW_Header::English) {
+      return 96.0;
+    }
+    if (measurement == DRW_Header::Metric) {
+      return kSvgPixelsPerMillimeter;
+    }
+  }
+
+  return 1.0;
 }
 
 std::string NormalizeDxfText(const std::string &text) {
@@ -624,6 +716,23 @@ void ForEachImportedDxfTextPoint(ImportedDxfText &text, Function &&function) {
       function(segment.end);
     }
   }
+}
+
+void ScalePoint(ImVec2 &point, double scale) {
+  point.x = static_cast<float>(static_cast<double>(point.x) * scale);
+  point.y = static_cast<float>(static_cast<double>(point.y) * scale);
+}
+
+void ScaleImportedDxfText(ImportedDxfText &text, double scale) {
+  if (std::abs(scale - 1.0) <= kEpsilon) {
+    return;
+  }
+
+  ScalePoint(text.anchor_point, scale);
+  text.text_height = static_cast<float>(text.text_height * scale);
+  text.stroke_width = static_cast<float>(text.stroke_width * scale);
+  ForEachImportedDxfTextPoint(
+      text, [scale](ImVec2 &point) { ScalePoint(point, scale); });
 }
 
 class VectorGlyphFont {
@@ -1274,7 +1383,12 @@ std::vector<DRW_Coord> SampleSplineCurve(const DRW_Spline &spline) {
 
 class DxfToSvgAdapter final : public DRW_Interface {
 public:
-  void addHeader(const DRW_Header *) override {}
+  void addHeader(const DRW_Header *data) override {
+    if (data == nullptr) {
+      return;
+    }
+    unit_to_svg_pixels_scale_ = ResolveDxfUnitToSvgPixelsScale(*data);
+  }
   void addLType(const DRW_LType &) override {}
   void addLayer(const DRW_Layer &) override {}
   void addDimStyle(const DRW_Dimstyle &) override {}
@@ -1783,21 +1897,32 @@ public:
       return {};
     }
 
-    const double margin = 12.0;
-    const double min_x = model_.min_x - margin;
-    const double min_y = model_.min_y - margin;
-    const double width =
-        std::max(1.0, (model_.max_x - model_.min_x) + margin * 2.0);
-    const double height =
-        std::max(1.0, (model_.max_y - model_.min_y) + margin * 2.0);
+    constexpr double margin = 12.0;
+    const double min_x = model_.min_x * unit_to_svg_pixels_scale_ - margin;
+    const double min_y = model_.min_y * unit_to_svg_pixels_scale_ - margin;
+    const double width = std::max(1.0, (model_.max_x - model_.min_x) *
+                                               unit_to_svg_pixels_scale_ +
+                                           margin * 2.0);
+    const double height = std::max(1.0, (model_.max_y - model_.min_y) *
+                                                unit_to_svg_pixels_scale_ +
+                                            margin * 2.0);
 
     std::ostringstream svg;
     svg << "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\""
         << FormatNumber(min_x) << ' ' << FormatNumber(min_y) << ' '
-        << FormatNumber(width) << ' ' << FormatNumber(height) << "\">\n"
-        << model_.body.str() << "</svg>\n";
+        << FormatNumber(width) << ' ' << FormatNumber(height) << "\">\n";
+    if (std::abs(unit_to_svg_pixels_scale_ - 1.0) > kEpsilon) {
+      svg << "<g transform=\"scale(" << FormatNumber(unit_to_svg_pixels_scale_)
+          << ")\">\n"
+          << model_.body.str() << "</g>\n";
+    } else {
+      svg << model_.body.str();
+    }
+    svg << "</svg>\n";
     return svg.str();
   }
+
+  double unit_to_svg_pixels_scale() const { return unit_to_svg_pixels_scale_; }
 
   std::vector<ImportedDxfText> TakeDxfText() {
     FinalizeGeometry();
@@ -2606,6 +2731,7 @@ private:
   int next_insert_token_id_ = 1;
   int next_generated_group_id_ = 1;
   bool geometry_finalized_ = false;
+  double unit_to_svg_pixels_scale_ = 1.0;
   VectorGlyphFont vector_glyph_font_;
   std::string current_block_name_;
 };
@@ -2644,6 +2770,12 @@ ImportResult ImportDxfFile(CanvasState &state,
 
   const std::string svg_data = adapter.BuildSvg();
   std::vector<ImportedDxfText> imported_text = adapter.TakeDxfText();
+  const double unit_to_svg_pixels_scale = adapter.unit_to_svg_pixels_scale();
+  if (std::abs(unit_to_svg_pixels_scale - 1.0) > kEpsilon) {
+    for (ImportedDxfText &text : imported_text) {
+      ScaleImportedDxfText(text, unit_to_svg_pixels_scale);
+    }
+  }
   if (svg_data.empty() && imported_text.empty()) {
     ImportResult result;
     result.success = false;

@@ -984,8 +984,7 @@ void HandleCanvasRightClickRelease(
     transient.context_imported_artwork_id = 0;
     state.selected_guide_id = hovered_guide_id;
     ImGui::OpenPopup("guide_context_menu");
-  } else if (!any_popup_open && IsCanvasArtworkScope(state) &&
-             artwork_hit.id != 0 &&
+  } else if (!any_popup_open && artwork_hit.id != 0 &&
              ImGui::IsMouseReleased(ImGuiMouseButton_Right) &&
              !transient.right_mouse_dragged) {
     transient.context_imported_artwork_id = artwork_hit.id;
@@ -1036,17 +1035,14 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
     if (ImportedArtwork *artwork =
             FindImportedArtwork(state, transient.context_imported_artwork_id);
         artwork != nullptr) {
-      const bool is_object_selection_scope =
-        state.selection_scope == ImportedArtworkSelectionScope::Object;
       const bool has_selected_elements =
-        !state.selected_imported_elements.empty() &&
-        state.selected_imported_artwork_id != 0;
+          !state.selected_imported_elements.empty() &&
+          state.selected_imported_artwork_id != 0;
       const bool can_copy = CanCopySelectionToClipboard(state);
       const bool can_paste = HasClipboardContent(state);
       const bool can_extract =
-        is_object_selection_scope &&
-        (has_selected_elements ||
-         HasExtractableImportedDebugSelection(state, *artwork));
+          has_selected_elements ||
+          HasExtractableImportedDebugSelection(state, *artwork);
       const bool can_group_artworks =
           HasGroupableImportedArtworkSelection(state);
       const bool can_group_selection =
@@ -1089,36 +1085,47 @@ void DrawCanvasContextMenus(CanvasState &state, TransientCanvasState &transient,
         PasteFromClipboard(state);
         ImGui::CloseCurrentPopup();
       }
-      if (is_object_selection_scope) {
-        ImGui::Separator();
-        if (ImGui::BeginMenu("Selection")) {
-          if (ImGui::MenuItem("Pointer", nullptr,
-                              state.imported_artwork_edit_mode ==
-                                  ImportedArtworkEditMode::None)) {
-            state.imported_artwork_edit_mode = ImportedArtworkEditMode::None;
-            ImGui::CloseCurrentPopup();
-          }
-          if (ImGui::MenuItem("Rectangle", nullptr,
-                              state.imported_artwork_edit_mode ==
-                                  ImportedArtworkEditMode::SelectRectangle)) {
-            state.imported_artwork_edit_mode =
-                ImportedArtworkEditMode::SelectRectangle;
-            ImGui::CloseCurrentPopup();
-          }
-          if (ImGui::MenuItem("Oval", nullptr,
-                              state.imported_artwork_edit_mode ==
-                                  ImportedArtworkEditMode::SelectOval)) {
-            state.imported_artwork_edit_mode =
-                ImportedArtworkEditMode::SelectOval;
-            ImGui::CloseCurrentPopup();
-          }
-          ImGui::EndMenu();
-        }
-        if (ImGui::MenuItem("Extract Selection", nullptr, false,
-                            can_extract)) {
-          ExtractSelectedImportedElements(state, artwork->id);
+      ImGui::Separator();
+      if (ImGui::MenuItem("Canvas Scope", nullptr,
+                          state.selection_scope ==
+                              ImportedArtworkSelectionScope::Canvas)) {
+        ApplyImportedArtworkSelectionScope(
+            state, ImportedArtworkSelectionScope::Canvas);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::MenuItem("Object Scope", nullptr,
+                          state.selection_scope ==
+                              ImportedArtworkSelectionScope::Object)) {
+        ApplyImportedArtworkSelectionScope(
+            state, ImportedArtworkSelectionScope::Object);
+        ImGui::CloseCurrentPopup();
+      }
+      if (ImGui::BeginMenu("Selection Tool")) {
+        if (ImGui::MenuItem("Pointer", nullptr,
+                            state.imported_artwork_edit_mode ==
+                                ImportedArtworkEditMode::None)) {
+          state.imported_artwork_edit_mode = ImportedArtworkEditMode::None;
           ImGui::CloseCurrentPopup();
         }
+        if (ImGui::MenuItem("Rectangle", nullptr,
+                            state.imported_artwork_edit_mode ==
+                                ImportedArtworkEditMode::SelectRectangle)) {
+          state.imported_artwork_edit_mode =
+              ImportedArtworkEditMode::SelectRectangle;
+          ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::MenuItem("Oval", nullptr,
+                            state.imported_artwork_edit_mode ==
+                                ImportedArtworkEditMode::SelectOval)) {
+          state.imported_artwork_edit_mode =
+              ImportedArtworkEditMode::SelectOval;
+          ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndMenu();
+      }
+      if (ImGui::MenuItem("Extract Selection", nullptr, false, can_extract)) {
+        ExtractSelectedImportedElements(state, artwork->id);
+        ImGui::CloseCurrentPopup();
       }
       ImGui::Separator();
       if (ImGui::MenuItem("Group", "Ctrl+G", false, can_group)) {

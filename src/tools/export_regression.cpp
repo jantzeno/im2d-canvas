@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <regex>
@@ -70,6 +71,24 @@ float BoundsHeight(const SvgExportResult &result) {
 
 bool NearlyEqual(float left, float right, float epsilon = 0.05f) {
   return std::fabs(left - right) <= epsilon;
+}
+
+std::string MakeSingleLineDxf(int measurement, int insunits, double length) {
+  std::ostringstream stream;
+  stream << "0\nSECTION\n2\nHEADER\n"
+         << "9\n$ACADVER\n1\nAC1015\n"
+         << "9\n$MEASUREMENT\n70\n"
+         << measurement << "\n"
+         << "9\n$INSUNITS\n70\n"
+         << insunits << "\n"
+         << "0\nENDSEC\n"
+         << "0\nSECTION\n2\nENTITIES\n"
+         << "0\nLINE\n8\n0\n"
+         << "10\n0.0\n20\n0.0\n30\n0.0\n"
+         << "11\n"
+         << length << "\n21\n0.0\n31\n0.0\n"
+         << "0\nENDSEC\n0\nEOF\n";
+  return stream.str();
 }
 
 bool HasCubicCommand(const std::string &svg) {
@@ -617,6 +636,45 @@ TestRun RunShapefontRegression(const fs::path &project_root) {
     Check(&run, selection.svg.find("<desc>") != std::string::npos,
           "Expected warning summary to be embedded in exported SVG metadata.");
   }
+  return run;
+}
+
+TestRun RunDxfInchUnitScaleRegression(const fs::path &project_root) {
+  TestRun run{"DXF inch unit scaling"};
+  CanvasState state = MakeDocument();
+  const fs::path file_path =
+      project_root / "build/dxf-inch-unit-scale-regression.dxf";
+  fs::create_directories(file_path.parent_path());
+
+  {
+    std::ofstream output(file_path);
+    if (!Check(&run, output.is_open(),
+               "Could not create temporary DXF regression fixture.")) {
+      return run;
+    }
+    output << MakeSingleLineDxf(/*measurement=*/0, /*insunits=*/1,
+                                /*length=*/1.0);
+  }
+
+  const ImportResult import = ImportDxfFile(state, file_path);
+  std::error_code remove_error;
+  fs::remove(file_path, remove_error);
+
+  if (!Check(&run, import.success, "DXF import failed: " + import.message)) {
+    return run;
+  }
+
+  const ImportedArtwork *artwork =
+      FindImportedArtwork(state, import.artwork_id);
+  if (!Check(&run, artwork != nullptr,
+             "Imported artwork was not added to canvas state.")) {
+    return run;
+  }
+
+  const float imported_width = artwork->bounds_max.x - artwork->bounds_min.x;
+  Check(&run, NearlyEqual(imported_width, 96.0f, 0.5f),
+        "Expected a 1-inch DXF line to import at about 96 px, got " +
+            std::to_string(imported_width) + ".");
   return run;
 }
 
@@ -1710,6 +1768,7 @@ int main() {
   results.push_back(RunAutoCloseRejectsAmbiguousEndpointRegression());
   results.push_back(RunTyrannosaurusWorkflowRegression(project_root));
   results.push_back(RunFidelityFirstPreservesUntouchedContoursRegression());
+  results.push_back(RunDxfInchUnitScaleRegression(project_root));
   results.push_back(RunShapefontRegression(project_root));
   results.push_back(RunAutobotAutoCloseWorkflowRegression(project_root));
   results.push_back(RunAutobotPrepareRegression(project_root));
