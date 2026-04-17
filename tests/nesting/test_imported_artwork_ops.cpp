@@ -308,6 +308,36 @@ TEST_CASE("RepairImportedArtworkOrphanHoles resolves orphan contours by "
   REQUIRE(state.imported_artwork.front().part.hole_contour_count == 0);
 }
 
+TEST_CASE("RefreshImportedArtworkPartMetadata classifies nested same-winding "
+          "contours as attached holes",
+          "[canvas][imported]") {
+  im2d::ImportedArtwork artwork = MakeArtworkWithRoot({
+      MakeRectanglePath(1, 0.0f, 0.0f, 10.0f, 10.0f, false),
+      MakeRectanglePath(2, 3.0f, 3.0f, 7.0f, 7.0f, false),
+  });
+
+  REQUIRE(artwork.part.outer_contour_count == 1);
+  REQUIRE(artwork.part.hole_contour_count == 1);
+  REQUIRE(artwork.part.attached_hole_count == 1);
+  REQUIRE(artwork.part.orphan_hole_count == 0);
+  REQUIRE(artwork.part.outer_contours.size() == 1);
+  REQUIRE(artwork.part.hole_attachments.size() == 1);
+}
+
+TEST_CASE("RefreshImportedArtworkPartMetadata does not treat lone clockwise "
+          "contours as holes without explicit hole flags",
+          "[canvas][imported]") {
+  im2d::ImportedArtwork artwork = MakeArtworkWithRoot(
+      {MakeRectanglePath(1, 0.0f, 0.0f, 10.0f, 10.0f, true)});
+
+  REQUIRE(artwork.part.outer_contour_count == 1);
+  REQUIRE(artwork.part.hole_contour_count == 0);
+  REQUIRE(artwork.part.attached_hole_count == 0);
+  REQUIRE(artwork.part.orphan_hole_count == 0);
+  REQUIRE(artwork.part.outer_contours.size() == 1);
+  REQUIRE(artwork.part.hole_attachments.empty());
+}
+
 TEST_CASE("ApplyImportedArtworkSelectionScope collapses object scope to one "
           "artwork and removes non-path element selections",
           "[canvas][imported]") {

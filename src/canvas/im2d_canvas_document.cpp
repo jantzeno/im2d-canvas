@@ -83,6 +83,7 @@ void EnsureContributingSourceArtworkId(ImportedArtwork &artwork) {
 }
 
 struct ClosedContourCandidate {
+  bool explicit_hole = false;
   bool is_hole = false;
   ImportedElementKind owner_kind = ImportedElementKind::Path;
   int owner_item_id = 0;
@@ -93,7 +94,8 @@ struct ClosedContourCandidate {
 };
 
 void AppendClosedContourCandidate(const Clipper2Lib::PathD &polygon,
-                                  bool is_hole, ImportedElementKind owner_kind,
+                                  bool explicit_hole,
+                                  ImportedElementKind owner_kind,
                                   int owner_item_id, int contour_index,
                                   std::vector<ClosedContourCandidate> *out) {
   if (polygon.size() < 3) {
@@ -103,8 +105,9 @@ void AppendClosedContourCandidate(const Clipper2Lib::PathD &polygon,
   if (area < kMinimumPreparedContourArea) {
     return;
   }
-  out->push_back({is_hole, owner_kind, owner_item_id, contour_index, polygon,
-                  Clipper2Lib::GetBounds(polygon), area});
+  out->push_back({explicit_hole, explicit_hole, owner_kind, owner_item_id,
+                  contour_index, polygon, Clipper2Lib::GetBounds(polygon),
+                  area});
 }
 
 bool RectContainsRect(const Clipper2Lib::RectD &outer,
@@ -113,16 +116,31 @@ bool RectContainsRect(const Clipper2Lib::RectD &outer,
          inner.right <= outer.right && inner.bottom <= outer.bottom;
 }
 
-bool OuterContainsHole(const ClosedContourCandidate &outer,
-                       const ClosedContourCandidate &hole) {
-  if (!RectContainsRect(outer.bounds, hole.bounds) || hole.polygon.empty()) {
+bool CandidateContainsContour(const ClosedContourCandidate &outer,
+                              const ClosedContourCandidate &inner) {
+  if (&outer == &inner || !RectContainsRect(outer.bounds, inner.bounds) ||
+      inner.polygon.empty()) {
     return false;
   }
-  const Clipper2Lib::PointD test_point = hole.polygon.front();
+  const Clipper2Lib::PointD test_point = inner.polygon.front();
   const auto containment =
       Clipper2Lib::PointInPolygon(test_point, outer.polygon);
   return containment == Clipper2Lib::PointInPolygonResult::IsInside ||
          containment == Clipper2Lib::PointInPolygonResult::IsOn;
+}
+
+int ContainmentDepth(const ClosedContourCandidate &candidate,
+                     const std::vector<ClosedContourCandidate> &contours) {
+  int depth = 0;
+  for (const ClosedContourCandidate &other : contours) {
+    if (&other == &candidate || other.area <= candidate.area) {
+      continue;
+    }
+    if (CandidateContainsContour(other, candidate)) {
+      depth += 1;
+    }
+  }
+  return depth;
 }
 
 ImportedContourReference
@@ -131,26 +149,11 @@ MakeContourReference(const ClosedContourCandidate &candidate) {
           candidate.contour_index};
 }
 
-double SampleImportedPathSignedArea(const ImportedPath &path) {
-  if (!path.closed || path.segments.empty()) {
-    return 0.0;
-  }
-
-  Clipper2Lib::PathD polygon = detail::SampleImportedPathToClipperPath(path);
-  if (polygon.size() < 3) {
-    return 0.0;
-  }
-  return Clipper2Lib::Area(polygon);
-}
-
-bool ImportedPathActsAsHole(const ImportedPath &path) {
+bool ImportedPathExplicitlyActsAsHole(const ImportedPath &path) {
   if (HasImportedPathFlag(path.flags, ImportedPathFlagHoleContour)) {
     return true;
   }
-  if (!path.closed) {
-    return false;
-  }
-  return SampleImportedPathSignedArea(path) < 0.0;
+  return false;
 }
 
 void InternalRecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
@@ -207,16 +210,11 @@ void InternalRecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
       continue;
     }
     if (path.closed) {
-      const bool is_hole = ImportedPathActsAsHole(path);
       artwork.part.closed_contour_count += 1;
-      if (is_hole) {
-        artwork.part.hole_contour_count += 1;
-      } else {
-        artwork.part.outer_contour_count += 1;
-      }
       AppendClosedContourCandidate(
-          detail::SampleImportedPathToClipperPath(path), is_hole,
-          ImportedElementKind::Path, path.id, 0, &closed_contours);
+          detail::SampleImportedPathToClipperPath(path),
+          ImportedPathExplicitlyActsAsHole(path), ImportedElementKind::Path,
+          path.id, 0, &closed_contours);
     } else {
       artwork.part.open_contour_count += 1;
       path.issue_flags |= ImportedElementIssueFlagOpenGeometry;
@@ -237,15 +235,10 @@ void InternalRecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
           continue;
         }
         if (contour.closed) {
-          const bool is_hole = contour.role == ImportedTextContourRole::Hole;
           artwork.part.closed_contour_count += 1;
-          if (is_hole) {
-            artwork.part.hole_contour_count += 1;
-          } else {
-            artwork.part.outer_contour_count += 1;
-          }
           AppendClosedContourCandidate(
-              detail::SampleImportedTextContourToClipperPath(contour), is_hole,
+              detail::SampleImportedTextContourToClipperPath(contour),
+              contour.role == ImportedTextContourRole::Hole,
               ImportedElementKind::DxfText, text.id, contour_index,
               &closed_contours);
         } else {
@@ -262,15 +255,10 @@ void InternalRecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
         continue;
       }
       if (contour.closed) {
-        const bool is_hole = contour.role == ImportedTextContourRole::Hole;
         artwork.part.closed_contour_count += 1;
-        if (is_hole) {
-          artwork.part.hole_contour_count += 1;
-        } else {
-          artwork.part.outer_contour_count += 1;
-        }
         AppendClosedContourCandidate(
-            detail::SampleImportedTextContourToClipperPath(contour), is_hole,
+            detail::SampleImportedTextContourToClipperPath(contour),
+            contour.role == ImportedTextContourRole::Hole,
             ImportedElementKind::DxfText, text.id, contour_index,
             &closed_contours);
       } else {
@@ -278,6 +266,16 @@ void InternalRecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
         text.issue_flags |= ImportedElementIssueFlagOpenGeometry;
       }
       contour_index += 1;
+    }
+  }
+
+  for (ClosedContourCandidate &candidate : closed_contours) {
+    const int depth = ContainmentDepth(candidate, closed_contours);
+    candidate.is_hole = candidate.explicit_hole || (depth % 2) == 1;
+    if (candidate.is_hole) {
+      artwork.part.hole_contour_count += 1;
+    } else {
+      artwork.part.outer_contour_count += 1;
     }
   }
 
@@ -296,7 +294,7 @@ void InternalRecomputeImportedArtworkPartMetadata(ImportedArtwork &artwork) {
   for (const ClosedContourCandidate *hole : holes) {
     const ClosedContourCandidate *best_outer = nullptr;
     for (const ClosedContourCandidate *outer : outers) {
-      if (!OuterContainsHole(*outer, *hole)) {
+      if (!CandidateContainsContour(*outer, *hole)) {
         continue;
       }
       if (best_outer == nullptr || outer->area < best_outer->area) {
