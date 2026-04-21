@@ -8,7 +8,43 @@ namespace im2d::detail {
 
 namespace {
 
-constexpr float kImportedCurveFlatteningTolerance = 12.0f;
+constexpr float kCurveFlatnessTolerance = 0.1f;
+constexpr int kMaxSubdivisionDepth = 8;
+
+bool IsCubicBezierFlat(const ImVec2 &p0, const ImVec2 &p1, const ImVec2 &p2,
+                       const ImVec2 &p3, float tolerance_sq_16) {
+  float ux = 3.0f * p1.x - 2.0f * p0.x - p3.x;
+  float uy = 3.0f * p1.y - 2.0f * p0.y - p3.y;
+  float vx = 3.0f * p2.x - 2.0f * p3.x - p0.x;
+  float vy = 3.0f * p2.y - 2.0f * p3.y - p0.y;
+  ux *= ux;
+  uy *= uy;
+  vx *= vx;
+  vy *= vy;
+  if (ux < vx)
+    ux = vx;
+  if (uy < vy)
+    uy = vy;
+  return (ux + uy) <= tolerance_sq_16;
+}
+
+void SubdivideCubicBezier(const ImVec2 &p0, const ImVec2 &p1, const ImVec2 &p2,
+                          const ImVec2 &p3, float tolerance_sq_16, int depth,
+                          std::vector<ImVec2> *points) {
+  if (depth >= kMaxSubdivisionDepth ||
+      IsCubicBezierFlat(p0, p1, p2, p3, tolerance_sq_16)) {
+    points->push_back(p3);
+    return;
+  }
+  const ImVec2 m01((p0.x + p1.x) * 0.5f, (p0.y + p1.y) * 0.5f);
+  const ImVec2 m12((p1.x + p2.x) * 0.5f, (p1.y + p2.y) * 0.5f);
+  const ImVec2 m23((p2.x + p3.x) * 0.5f, (p2.y + p3.y) * 0.5f);
+  const ImVec2 m012((m01.x + m12.x) * 0.5f, (m01.y + m12.y) * 0.5f);
+  const ImVec2 m123((m12.x + m23.x) * 0.5f, (m12.y + m23.y) * 0.5f);
+  const ImVec2 mid((m012.x + m123.x) * 0.5f, (m012.y + m123.y) * 0.5f);
+  SubdivideCubicBezier(p0, m01, m012, mid, tolerance_sq_16, depth + 1, points);
+  SubdivideCubicBezier(mid, m123, m23, p3, tolerance_sq_16, depth + 1, points);
+}
 
 } // namespace
 
@@ -40,21 +76,17 @@ void AppendSampledSegmentPointsLocal(
     return;
   }
 
+  const float tolerance_sq_16 =
+      16.0f * kCurveFlatnessTolerance * kCurveFlatnessTolerance;
+
   sample_points->push_back(segments.front().start);
   for (const ImportedPathSegment &segment : segments) {
     if (segment.kind == ImportedPathSegmentKind::Line) {
       sample_points->push_back(segment.end);
       continue;
     }
-
-    for (int sample_index = 1;
-         sample_index <= static_cast<int>(kImportedCurveFlatteningTolerance);
-         ++sample_index) {
-      const float t =
-          static_cast<float>(sample_index) / kImportedCurveFlatteningTolerance;
-      sample_points->push_back(CubicBezierPoint(
-          segment.start, segment.control1, segment.control2, segment.end, t));
-    }
+    SubdivideCubicBezier(segment.start, segment.control1, segment.control2,
+                         segment.end, tolerance_sq_16, 0, sample_points);
   }
 }
 

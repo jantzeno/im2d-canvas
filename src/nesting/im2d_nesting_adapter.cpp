@@ -5,6 +5,8 @@
 #include "im2d_nesting_geometry.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <string>
 
@@ -12,17 +14,46 @@ namespace im2d::nesting {
 
 namespace {
 
+constexpr std::size_t kSimplifyVertexThreshold = 24;
+constexpr double kSimplifyDiagonalFraction = 0.0003;
+constexpr double kSimplifyMaxEpsilon = 0.02;
+
 bool SameContourReference(const ImportedContourReference &left,
                           const ImportedContourReference &right) {
   return left.kind == right.kind && left.item_id == right.item_id &&
          left.contour_index == right.contour_index;
 }
 
+Clipper2Lib::PathD SimplifyClipperPath(const Clipper2Lib::PathD &path) {
+  if (path.size() <= kSimplifyVertexThreshold) {
+    return path;
+  }
+  double min_x = std::numeric_limits<double>::max();
+  double max_x = std::numeric_limits<double>::lowest();
+  double min_y = std::numeric_limits<double>::max();
+  double max_y = std::numeric_limits<double>::lowest();
+  for (const auto &pt : path) {
+    min_x = std::min(min_x, pt.x);
+    max_x = std::max(max_x, pt.x);
+    min_y = std::min(min_y, pt.y);
+    max_y = std::max(max_y, pt.y);
+  }
+  const double diagonal = std::hypot(max_x - min_x, max_y - min_y);
+  const double epsilon =
+      std::min(diagonal * kSimplifyDiagonalFraction, kSimplifyMaxEpsilon);
+  if (epsilon <= 0.0) {
+    return path;
+  }
+  auto simplified = Clipper2Lib::SimplifyPath(path, epsilon, true);
+  return simplified.size() >= 3 ? simplified : path;
+}
+
 Contour ConvertPathDToWorldContour(const ImportedArtwork &artwork,
                                    const Clipper2Lib::PathD &path) {
+  const auto simplified = SimplifyClipperPath(path);
   Contour contour;
-  contour.reserve(path.size());
-  for (const Clipper2Lib::PointD &point : path) {
+  contour.reserve(simplified.size());
+  for (const Clipper2Lib::PointD &point : simplified) {
     const ImVec2 world = ImportedArtworkPointToWorld(
         artwork,
         ImVec2(static_cast<float>(point.x), static_cast<float>(point.y)));
