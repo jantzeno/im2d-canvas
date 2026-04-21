@@ -6,9 +6,7 @@
 #include "../operations/im2d_operations.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <cstdio>
 #include <filesystem>
 #include <future>
 
@@ -37,12 +35,11 @@ im2d::exporter::SvgExportResult &GetSvgExportPreview() {
 }
 
 struct SvgExportUiState {
-  int configured_artwork_id = 0;
-  int configured_export_area_id = 0;
+  int configured_export_area_count = -1;
+  int selected_export_area_id = 0;
   bool allow_placeholder_text = false;
-  std::array<char, 256> output_directory = {};
-  std::array<char, 128> selection_filename = {};
-  std::array<char, 128> export_area_filename = {};
+  im2d::exporter::SvgExportAllMode all_export_mode =
+      im2d::exporter::SvgExportAllMode::Combined;
 };
 
 struct PrepareWorkflowUiState {
@@ -381,93 +378,208 @@ void DrawPrepareForCuttingModal(im2d::CanvasState &state) {
   ImGui::EndPopup();
 }
 
-template <size_t N>
-void CopyTextToBuffer(const std::string &text, std::array<char, N> *buffer) {
-  if (buffer == nullptr || N == 0) {
-    return;
-  }
-  std::snprintf(buffer->data(), buffer->size(), "%s", text.c_str());
-}
-
-template <size_t N> std::string BufferText(const std::array<char, N> &buffer) {
-  return std::string(buffer.data());
-}
-
-std::string SanitizeExportStem(const std::string &text) {
-  std::string stem;
-  stem.reserve(text.size());
-  for (const char character : text) {
-    if ((character >= 'a' && character <= 'z') ||
-        (character >= 'A' && character <= 'Z') ||
-        (character >= '0' && character <= '9')) {
-      stem.push_back(static_cast<char>(std::tolower(character)));
-      continue;
-    }
-    if (!stem.empty() && stem.back() != '-') {
-      stem.push_back('-');
+int ExportAreaOrdinal(const im2d::CanvasState &state, int export_area_id) {
+  for (size_t index = 0; index < state.export_areas.size(); ++index) {
+    if (state.export_areas[index].id == export_area_id) {
+      return static_cast<int>(index) + 1;
     }
   }
-  while (!stem.empty() && stem.back() == '-') {
-    stem.pop_back();
+  return 0;
+}
+
+std::string SvgExportTargetLabel(const im2d::CanvasState &state,
+                                 const SvgExportUiState &ui_state) {
+  if (ui_state.selected_export_area_id == 0) {
+    return "All";
   }
-  return stem.empty() ? "artwork" : stem;
+  const int ordinal = ExportAreaOrdinal(state, ui_state.selected_export_area_id);
+  return ordinal <= 0 ? "Bed" : "Bed #" + std::to_string(ordinal);
 }
 
-std::filesystem::path
-DefaultSelectionExportPath(const im2d::ImportedArtwork &artwork) {
-  return std::filesystem::path("build") / "exports" /
-         (SanitizeExportStem(artwork.name) + "-selection.svg");
-}
-
-std::filesystem::path DefaultExportAreaPath(const im2d::CanvasState &state) {
-  const int export_area_id =
-      state.export_areas.empty() ? 0 : state.export_areas.front().id;
-  return std::filesystem::path("build") / "exports" /
-         ("export-area-" + std::to_string(export_area_id) + ".svg");
+const char *SvgExportAllModeLabel(im2d::exporter::SvgExportAllMode mode) {
+  switch (mode) {
+  case im2d::exporter::SvgExportAllMode::Combined:
+    return "Combined SVG";
+  case im2d::exporter::SvgExportAllMode::FilePerExportArea:
+    return "SVG per Bed";
+  }
+  return "Combined SVG";
 }
 
 void SyncSvgExportUiState(SvgExportUiState *ui_state,
-                          const im2d::CanvasState &state,
-                          const im2d::ImportedArtwork &artwork) {
+                          const im2d::CanvasState &state) {
   if (ui_state == nullptr) {
     return;
   }
 
-  const int export_area_id =
+  const int export_area_count = static_cast<int>(state.export_areas.size());
+  const int first_export_area_id =
       state.export_areas.empty() ? 0 : state.export_areas.front().id;
-  if (ui_state->configured_artwork_id == artwork.id &&
-      ui_state->configured_export_area_id == export_area_id &&
-      ui_state->output_directory[0] != '\0' &&
-      ui_state->selection_filename[0] != '\0' &&
-      ui_state->export_area_filename[0] != '\0') {
+  const bool first_sync = ui_state->configured_export_area_count < 0;
+  ui_state->configured_export_area_count = export_area_count;
+
+  if (state.export_areas.empty()) {
+    ui_state->selected_export_area_id = 0;
     return;
   }
 
-  const std::filesystem::path selection_path =
-      DefaultSelectionExportPath(artwork);
-  const std::filesystem::path export_area_path = DefaultExportAreaPath(state);
-  const std::filesystem::path output_directory =
-      selection_path.has_parent_path() ? selection_path.parent_path()
-                                       : std::filesystem::path(".");
+  if (first_sync) {
+    ui_state->selected_export_area_id = first_export_area_id;
+    return;
+  }
 
-  CopyTextToBuffer(output_directory.string(), &ui_state->output_directory);
-  CopyTextToBuffer(selection_path.filename().string(),
-                   &ui_state->selection_filename);
-  CopyTextToBuffer(export_area_path.filename().string(),
-                   &ui_state->export_area_filename);
-  ui_state->configured_artwork_id = artwork.id;
-  ui_state->configured_export_area_id = export_area_id;
+  if (ui_state->selected_export_area_id == 0 ||
+      im2d::FindExportArea(state, ui_state->selected_export_area_id) != nullptr) {
+    return;
+  }
+
+  ui_state->selected_export_area_id = first_export_area_id;
 }
 
-std::filesystem::path BuildExportPath(const std::array<char, 256> &directory,
-                                      const std::array<char, 128> &filename,
-                                      const std::filesystem::path &fallback) {
-  const std::string directory_text = BufferText(directory);
-  const std::string filename_text = BufferText(filename);
-  if (directory_text.empty() || filename_text.empty()) {
-    return fallback;
+im2d::exporter::SvgExportRequest MakeSelectionExportRequest(
+    const im2d::ImportedArtwork &artwork, const SvgExportUiState &ui_state) {
+  im2d::exporter::SvgExportRequest request;
+  request.scope = im2d::exporter::SvgExportScope::ActiveSelection;
+  request.imported_artwork_id = artwork.id;
+  request.allow_placeholder_text = ui_state.allow_placeholder_text;
+  return request;
+}
+
+im2d::exporter::SvgExportRequest
+MakeExportAreaExportRequest(const SvgExportUiState &ui_state) {
+  im2d::exporter::SvgExportRequest request;
+  request.scope = im2d::exporter::SvgExportScope::ExportArea;
+  request.allow_placeholder_text = ui_state.allow_placeholder_text;
+  if (ui_state.selected_export_area_id == 0) {
+    request.export_area_target = im2d::exporter::SvgExportAreaTarget::AllExportAreas;
+    request.all_export_mode = ui_state.all_export_mode;
+  } else {
+    request.export_area_id = ui_state.selected_export_area_id;
   }
-  return std::filesystem::path(directory_text) / filename_text;
+  return request;
+}
+
+void ExpandExportBounds(im2d::exporter::SvgExportResult *aggregate,
+                        const im2d::exporter::SvgExportResult &result,
+                        bool *have_bounds) {
+  if (aggregate == nullptr || have_bounds == nullptr) {
+    return;
+  }
+  if (!*have_bounds) {
+    aggregate->bounds_min = result.bounds_min;
+    aggregate->bounds_max = result.bounds_max;
+    *have_bounds = true;
+    return;
+  }
+  aggregate->bounds_min.x = std::min(aggregate->bounds_min.x, result.bounds_min.x);
+  aggregate->bounds_min.y = std::min(aggregate->bounds_min.y, result.bounds_min.y);
+  aggregate->bounds_max.x = std::max(aggregate->bounds_max.x, result.bounds_max.x);
+  aggregate->bounds_max.y = std::max(aggregate->bounds_max.y, result.bounds_max.y);
+}
+
+im2d::exporter::SvgExportResult SaveSvgExportRequestToDefaultPaths(
+    const im2d::CanvasState &state,
+    const im2d::exporter::SvgExportRequest &request) {
+  const std::vector<std::filesystem::path> output_paths =
+      im2d::exporter::DefaultSvgExportPaths(state, request);
+  if (output_paths.empty()) {
+    im2d::exporter::SvgExportResult result;
+    result.message = "No SVG export path is available for the current target.";
+    return result;
+  }
+
+  if (!(request.scope == im2d::exporter::SvgExportScope::ExportArea &&
+        request.export_area_target ==
+            im2d::exporter::SvgExportAreaTarget::AllExportAreas &&
+        request.all_export_mode ==
+            im2d::exporter::SvgExportAllMode::FilePerExportArea)) {
+    return im2d::exporter::ExportSvgToFile(state, request, output_paths.front());
+  }
+
+  if (output_paths.size() != state.export_areas.size()) {
+    im2d::exporter::SvgExportResult result;
+    result.message = "Per-bed export path planning did not match the current beds.";
+    return result;
+  }
+
+  im2d::exporter::SvgExportResult aggregate;
+  bool have_bounds = false;
+  for (size_t index = 0; index < state.export_areas.size(); ++index) {
+    im2d::exporter::SvgExportRequest file_request = request;
+    file_request.export_area_target =
+        im2d::exporter::SvgExportAreaTarget::SpecificExportArea;
+    file_request.all_export_mode = im2d::exporter::SvgExportAllMode::Combined;
+    file_request.export_area_id = state.export_areas[index].id;
+
+    const im2d::exporter::SvgExportResult file_result =
+        im2d::exporter::ExportSvgToFile(state, file_request, output_paths[index]);
+    if (!file_result.success) {
+      return file_result;
+    }
+
+    aggregate.success = true;
+    aggregate.path_count += file_result.path_count;
+    aggregate.text_count += file_result.text_count;
+    aggregate.export_area_count += file_result.export_area_count;
+    aggregate.placeholder_text_count += file_result.placeholder_text_count;
+    aggregate.substituted_font_text_count +=
+        file_result.substituted_font_text_count;
+    aggregate.open_geometry_item_count += file_result.open_geometry_item_count;
+    aggregate.line_segment_count += file_result.line_segment_count;
+    aggregate.cubic_segment_count += file_result.cubic_segment_count;
+    aggregate.output_paths.push_back(file_result.output_path);
+    ExpandExportBounds(&aggregate, file_result, &have_bounds);
+
+    const std::string prefix =
+        "Bed #" + std::to_string(static_cast<int>(index) + 1) + ": ";
+    for (const std::string &warning : file_result.warnings) {
+      aggregate.warnings.push_back(prefix + warning);
+    }
+  }
+
+  aggregate.warning_count = static_cast<int>(aggregate.warnings.size());
+  aggregate.message =
+      "Exported " + std::to_string(aggregate.output_paths.size()) +
+      " SVG files, one per bed.";
+  if (!aggregate.output_paths.empty()) {
+    const std::filesystem::path output_directory =
+        std::filesystem::path(aggregate.output_paths.front()).parent_path();
+    if (!output_directory.empty()) {
+      aggregate.message +=
+          " Saved to " + output_directory.lexically_normal().string() + ".";
+    }
+  }
+  return aggregate;
+}
+
+void DrawSvgExportPathsLabel(
+    const char *label, const std::vector<std::filesystem::path> &paths) {
+  if (paths.empty()) {
+    return;
+  }
+
+  if (paths.size() == 1) {
+    const std::string text = paths.front().lexically_normal().string();
+    ImGui::TextWrapped("%s: %s", label, text.c_str());
+    return;
+  }
+
+  ImGui::TextUnformatted(label);
+  for (const std::filesystem::path &path : paths) {
+    const std::string text = path.lexically_normal().string();
+    ImGui::BulletText("%s", text.c_str());
+  }
+}
+
+void DrawSvgExportOutputPaths(const im2d::exporter::SvgExportResult &result) {
+  if (result.output_paths.empty()) {
+    return;
+  }
+
+  ImGui::TextUnformatted("Saved Files");
+  for (const std::string &output_path : result.output_paths) {
+    ImGui::BulletText("%s", output_path.c_str());
+  }
 }
 
 std::string SvgExportSummary(const im2d::exporter::SvgExportResult &result) {
@@ -497,9 +609,13 @@ std::string SvgExportSummary(const im2d::exporter::SvgExportResult &result) {
     summary +=
         ", open-items=" + std::to_string(result.open_geometry_item_count);
   }
-  summary += ", bytes=" + std::to_string(result.svg.size());
+  if (!result.svg.empty()) {
+    summary += ", bytes=" + std::to_string(result.svg.size());
+  }
   if (!result.output_path.empty()) {
     summary += ", file=" + result.output_path;
+  } else if (!result.output_paths.empty()) {
+    summary += ", files=" + std::to_string(result.output_paths.size());
   }
   return summary;
 }
@@ -1508,33 +1624,75 @@ bool DrawImportedArtworkObjectInspectorContentsInternal(
 void DrawImportedArtworkSvgExportContentsInternal(
     im2d::CanvasState &state, im2d::ImportedArtwork &artwork) {
   SvgExportUiState &export_ui = GetSvgExportUiState();
-  SyncSvgExportUiState(&export_ui, state, artwork);
-  const std::filesystem::path selection_export_path =
-      BuildExportPath(export_ui.output_directory, export_ui.selection_filename,
-                      DefaultSelectionExportPath(artwork));
-  const std::filesystem::path export_area_path = BuildExportPath(
-      export_ui.output_directory, export_ui.export_area_filename,
-      DefaultExportAreaPath(state));
+  SyncSvgExportUiState(&export_ui, state);
+  const im2d::exporter::SvgExportRequest selection_request =
+      MakeSelectionExportRequest(artwork, export_ui);
+  const im2d::exporter::SvgExportRequest export_request =
+      MakeExportAreaExportRequest(export_ui);
+  const std::vector<std::filesystem::path> selection_export_paths =
+      im2d::exporter::DefaultSvgExportPaths(state, selection_request);
+  const std::vector<std::filesystem::path> target_export_paths =
+      im2d::exporter::DefaultSvgExportPaths(state, export_request);
   const bool has_selected_elements = !state.selected_imported_elements.empty();
+  const bool has_export_area = !state.export_areas.empty();
+  const bool can_preview_target_export =
+      has_export_area &&
+      !(export_request.export_area_target ==
+            im2d::exporter::SvgExportAreaTarget::AllExportAreas &&
+        export_request.all_export_mode ==
+            im2d::exporter::SvgExportAllMode::FilePerExportArea);
 
   ImGui::TextUnformatted("SVG Export");
   ImGui::Checkbox("Allow Placeholder DXF Export (Diagnostics)",
                   &export_ui.allow_placeholder_text);
-  ImGui::InputText("Output Directory", export_ui.output_directory.data(),
-                   export_ui.output_directory.size());
-  ImGui::InputText("Selection File", export_ui.selection_filename.data(),
-                   export_ui.selection_filename.size());
-  ImGui::InputText("Export Area File", export_ui.export_area_filename.data(),
-                   export_ui.export_area_filename.size());
-  if (ImGui::Button("Reset Export Paths")) {
-    export_ui.configured_artwork_id = 0;
-    export_ui.configured_export_area_id = 0;
-    SyncSvgExportUiState(&export_ui, state, artwork);
+  if (ImGui::BeginCombo("Target", SvgExportTargetLabel(state, export_ui).c_str())) {
+    const bool all_selected = export_ui.selected_export_area_id == 0;
+    if (ImGui::Selectable("All", all_selected)) {
+      export_ui.selected_export_area_id = 0;
+    }
+    if (all_selected) {
+      ImGui::SetItemDefaultFocus();
+    }
+    for (const im2d::ExportArea &area : state.export_areas) {
+      const int ordinal = ExportAreaOrdinal(state, area.id);
+      const std::string label = ordinal <= 0
+                                    ? "Bed"
+                                    : "Bed #" + std::to_string(ordinal);
+      const bool selected = export_ui.selected_export_area_id == area.id;
+      if (ImGui::Selectable(label.c_str(), selected)) {
+        export_ui.selected_export_area_id = area.id;
+      }
+      if (selected) {
+        ImGui::SetItemDefaultFocus();
+      }
+    }
+    ImGui::EndCombo();
   }
-  ImGui::TextWrapped("Selection Save Path: %s",
-                     selection_export_path.lexically_normal().string().c_str());
-  ImGui::TextWrapped("Export-Area Save Path: %s",
-                     export_area_path.lexically_normal().string().c_str());
+  if (export_ui.selected_export_area_id == 0) {
+    int mode =
+        export_ui.all_export_mode ==
+                im2d::exporter::SvgExportAllMode::FilePerExportArea
+            ? 1
+            : 0;
+    ImGui::TextUnformatted("All Beds Mode");
+    if (ImGui::RadioButton(
+            SvgExportAllModeLabel(im2d::exporter::SvgExportAllMode::Combined),
+            mode == 0)) {
+      mode = 0;
+    }
+    ImGui::SameLine();
+    if (ImGui::RadioButton(
+            SvgExportAllModeLabel(
+                im2d::exporter::SvgExportAllMode::FilePerExportArea),
+            mode == 1)) {
+      mode = 1;
+    }
+    export_ui.all_export_mode =
+        mode == 0 ? im2d::exporter::SvgExportAllMode::Combined
+                  : im2d::exporter::SvgExportAllMode::FilePerExportArea;
+  }
+  DrawSvgExportPathsLabel("Selection Save Path", selection_export_paths);
+  DrawSvgExportPathsLabel("Target Save Path", target_export_paths);
 
   const bool has_debug_export_target =
       state.selected_imported_debug.artwork_id == artwork.id &&
@@ -1561,43 +1719,35 @@ void DrawImportedArtworkSvgExportContentsInternal(
     ImGui::BeginDisabled();
   }
   if (ImGui::Button("Save Selection SVG")) {
-    im2d::exporter::SvgExportRequest request;
-    request.scope = im2d::exporter::SvgExportScope::ActiveSelection;
-    request.imported_artwork_id = artwork.id;
-    request.allow_placeholder_text = export_ui.allow_placeholder_text;
     GetSvgExportPreview() =
-        im2d::exporter::ExportSvgToFile(state, request, selection_export_path);
+        SaveSvgExportRequestToDefaultPaths(state, selection_request);
   }
   if (!has_export_selection) {
     ImGui::EndDisabled();
   }
 
-  const bool has_export_area = !state.export_areas.empty();
-  if (!has_export_area) {
+  if (!can_preview_target_export) {
     ImGui::BeginDisabled();
   }
-  if (ImGui::Button("Preview Export Area SVG")) {
-    im2d::exporter::SvgExportRequest request;
-    request.scope = im2d::exporter::SvgExportScope::ExportArea;
-    request.allow_placeholder_text = export_ui.allow_placeholder_text;
-    GetSvgExportPreview() = im2d::exporter::ExportSvg(state, request);
+  if (ImGui::Button("Preview Target SVG")) {
+    GetSvgExportPreview() = im2d::exporter::ExportSvg(state, export_request);
   }
-  if (!has_export_area) {
+  if (!can_preview_target_export) {
     ImGui::EndDisabled();
   }
   ImGui::SameLine();
   if (!has_export_area) {
     ImGui::BeginDisabled();
   }
-  if (ImGui::Button("Save Export Area SVG")) {
-    im2d::exporter::SvgExportRequest request;
-    request.scope = im2d::exporter::SvgExportScope::ExportArea;
-    request.allow_placeholder_text = export_ui.allow_placeholder_text;
+  if (ImGui::Button("Save Target SVG")) {
     GetSvgExportPreview() =
-        im2d::exporter::ExportSvgToFile(state, request, export_area_path);
+        SaveSvgExportRequestToDefaultPaths(state, export_request);
   }
   if (!has_export_area) {
     ImGui::EndDisabled();
+  }
+  if (has_export_area && !can_preview_target_export) {
+    ImGui::TextDisabled("Preview is unavailable when All exports one file per bed.");
   }
   ImGui::SameLine();
   if (GetSvgExportPreview().svg.empty()) {
@@ -1613,6 +1763,7 @@ void DrawImportedArtworkSvgExportContentsInternal(
   if (!GetSvgExportPreview().message.empty()) {
     ImGui::TextWrapped("%s", SvgExportSummary(GetSvgExportPreview()).c_str());
     DrawSvgExportWarnings(GetSvgExportPreview());
+    DrawSvgExportOutputPaths(GetSvgExportPreview());
   }
 }
 

@@ -5,6 +5,7 @@
 #include "../common/im2d_xml_utils.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -42,7 +43,10 @@ struct ExportArtworkSelection {
 struct ExportPlan {
   std::vector<ExportArtworkSelection> artwork_selections;
   std::vector<ExportItem> items;
+  std::vector<const WorkingArea *> working_areas;
 };
+
+constexpr const char *kDefaultExportDirectory = "build/exports";
 
 std::string FormatNumber(float value) {
   return im2d::FormatNumber(value, 6, true);
@@ -108,6 +112,127 @@ bool RectsIntersect(const WorldRect &a, const WorldRect &b) {
   }
   return !(a.max.x < b.min.x || a.min.x > b.max.x || a.max.y < b.min.y ||
            a.min.y > b.max.y);
+}
+
+bool RectIntersectsAny(const WorldRect &candidate,
+                      const std::vector<WorldRect> &bounds) {
+  return std::any_of(bounds.begin(), bounds.end(),
+                     [&candidate](const WorldRect &bound) {
+                       return RectsIntersect(candidate, bound);
+                     });
+}
+
+std::string SanitizeExportStem(std::string_view text) {
+  std::string stem;
+  stem.reserve(text.size());
+  for (const unsigned char character : text) {
+    if ((character >= 'a' && character <= 'z') ||
+        (character >= 'A' && character <= 'Z') ||
+        (character >= '0' && character <= '9')) {
+      stem.push_back(static_cast<char>(std::tolower(character)));
+      continue;
+    }
+    if (!stem.empty() && stem.back() != '-') {
+      stem.push_back('-');
+    }
+  }
+  while (!stem.empty() && stem.back() == '-') {
+    stem.pop_back();
+  }
+  return stem.empty() ? "artwork" : stem;
+}
+
+int ExportAreaOrdinal(const CanvasState &state, int export_area_id) {
+  for (size_t index = 0; index < state.export_areas.size(); ++index) {
+    if (state.export_areas[index].id == export_area_id) {
+      return static_cast<int>(index) + 1;
+    }
+  }
+  return 0;
+}
+
+std::optional<int> ResolveSpecificExportAreaId(const CanvasState &state,
+                                               const SvgExportRequest &request) {
+  if (request.export_area_id != 0) {
+    return request.export_area_id;
+  }
+  if (state.export_areas.empty()) {
+    return std::nullopt;
+  }
+  return state.export_areas.front().id;
+}
+
+std::vector<const ExportArea *>
+ResolveRequestedExportAreas(const CanvasState &state,
+                            const SvgExportRequest &request,
+                            SvgExportResult *result) {
+  std::vector<const ExportArea *> areas;
+  if (request.export_area_target == SvgExportAreaTarget::AllExportAreas) {
+    if (state.export_areas.empty()) {
+      if (result != nullptr) {
+        result->message = "Export-area export requires at least one export area.";
+      }
+      return areas;
+    }
+    areas.reserve(state.export_areas.size());
+    for (const ExportArea &area : state.export_areas) {
+      areas.push_back(&area);
+    }
+    return areas;
+  }
+
+  const std::optional<int> export_area_id =
+      ResolveSpecificExportAreaId(state, request);
+  if (!export_area_id.has_value()) {
+    if (result != nullptr) {
+      result->message = "Export-area export requires at least one export area.";
+    }
+    return areas;
+  }
+
+  const ExportArea *area = FindExportArea(state, *export_area_id);
+  if (area == nullptr) {
+    if (result != nullptr) {
+      result->message = "Requested export area was not found.";
+    }
+    return areas;
+  }
+  areas.push_back(area);
+  return areas;
+}
+
+const WorkingArea *ResolveWorkingAreaForExportArea(const CanvasState &state,
+                                                   const ExportArea &area) {
+  if (area.source_working_area_id != 0) {
+    if (const WorkingArea *working_area =
+            FindWorkingArea(state, area.source_working_area_id);
+        working_area != nullptr) {
+      return working_area;
+    }
+  }
+  return FindWorkingArea(state, area.id);
+}
+
+std::filesystem::path DefaultSelectionExportPath(const CanvasState &state,
+                                                 const SvgExportRequest &request) {
+  const ImportedArtwork *artwork =
+      FindImportedArtwork(state, request.imported_artwork_id);
+  const std::string stem =
+      artwork == nullptr ? "selection" : SanitizeExportStem(artwork->name);
+  return std::filesystem::path(kDefaultExportDirectory) /
+         (stem + "-selection.svg");
+}
+
+std::filesystem::path DefaultSpecificExportAreaPath(const CanvasState &state,
+                                                    int export_area_id) {
+  const int ordinal = ExportAreaOrdinal(state, export_area_id);
+  const int safe_ordinal = ordinal <= 0 ? 1 : ordinal;
+  return std::filesystem::path(kDefaultExportDirectory) /
+         ("bed-" + std::to_string(safe_ordinal) + ".svg");
+}
+
+std::filesystem::path DefaultAllExportAreasCombinedPath() {
+  return std::filesystem::path(kDefaultExportDirectory) / "all-beds.svg";
 }
 
 constexpr float kSvgPreviewStrokeWidth = 1.0f;
@@ -558,15 +683,29 @@ std::optional<ExportPlan> GatherExportAreaItems(const CanvasState &state,
                                                 const SvgExportRequest &request,
                                                 SvgExportResult *result,
                                                 WorldRect *world_bounds) {
-  const ExportArea *area = FindExportArea(state, request.export_area_id);
-  if (area == nullptr) {
-    result->message = "Export-area export requires at least one export area.";
+  const std::vector<const ExportArea *> areas =
+      ResolveRequestedExportAreas(state, request, result);
+  if (areas.empty()) {
     return std::nullopt;
   }
 
-  *world_bounds = MakeRect(area->origin, ImVec2(area->origin.x + area->size.x,
-                                                area->origin.y + area->size.y));
+  std::vector<WorldRect> export_area_bounds;
+  export_area_bounds.reserve(areas.size());
+  result->export_area_count = static_cast<int>(areas.size());
   ExportPlan plan;
+  std::unordered_set<int> working_area_ids;
+  for (const ExportArea *area : areas) {
+    const WorldRect area_bounds = MakeRect(
+        area->origin, ImVec2(area->origin.x + area->size.x,
+                             area->origin.y + area->size.y));
+    export_area_bounds.push_back(area_bounds);
+    ExpandRect(world_bounds, area_bounds);
+    if (const WorkingArea *working_area =
+            ResolveWorkingAreaForExportArea(state, *area);
+        working_area != nullptr && working_area_ids.insert(working_area->id).second) {
+      plan.working_areas.push_back(working_area);
+    }
+  }
   for (const ImportedArtwork &artwork : state.imported_artwork) {
     if (!artwork.visible) {
       continue;
@@ -579,7 +718,7 @@ std::optional<ExportPlan> GatherExportAreaItems(const CanvasState &state,
         continue;
       }
       const WorldRect bounds = PathWorldBounds(artwork, path);
-      if (RectsIntersect(*world_bounds, bounds)) {
+      if (RectIntersectsAny(bounds, export_area_bounds)) {
         if (selection == nullptr) {
           selection =
               FindOrAppendArtworkSelection(&plan.artwork_selections, &artwork);
@@ -590,7 +729,7 @@ std::optional<ExportPlan> GatherExportAreaItems(const CanvasState &state,
 
     for (const ImportedDxfText &text : artwork.dxf_text) {
       const WorldRect bounds = TextWorldBounds(artwork, text);
-      if (RectsIntersect(*world_bounds, bounds)) {
+      if (RectIntersectsAny(bounds, export_area_bounds)) {
         if (selection == nullptr) {
           selection =
               FindOrAppendArtworkSelection(&plan.artwork_selections, &artwork);
@@ -789,11 +928,42 @@ void AppendSerializedArtwork(std::ostringstream &svg,
   svg << "  </g>\n";
 }
 
+void AppendSerializedWorkingArea(std::ostringstream &svg,
+                                 const WorkingArea &working_area,
+                                 const ImVec2 &origin_offset,
+                                 int indent_level) {
+  const std::string indent(static_cast<size_t>(indent_level) * 2, ' ');
+  svg << indent << "<rect data-im2d-kind=\"working-area\""
+      << " data-im2d-source-working-area-id=\"" << working_area.id << "\"";
+  if (!working_area.name.empty()) {
+    svg << " id=\"working-area-" << working_area.id << "\""
+        << " data-im2d-label=\"" << EscapeXml(working_area.name) << "\"";
+  }
+  svg << " x=\"" << FormatNumber(working_area.origin.x - origin_offset.x) << "\""
+      << " y=\"" << FormatNumber(working_area.origin.y - origin_offset.y) << "\""
+      << " width=\"" << FormatNumber(working_area.size.x) << "\""
+      << " height=\"" << FormatNumber(working_area.size.y) << "\""
+      << " fill=\"none\""
+      << " stroke=\"" << ColorToHex(working_area.border_color) << "\""
+      << " stroke-opacity=\"" << FormatNumber(working_area.border_color.w) << "\""
+      << " stroke-width=\""
+      << FormatNumber(std::max(working_area.outline_thickness, 1.0f)) << "\""
+      << " vector-effect=\"non-scaling-stroke\"/>\n";
+}
+
 } // namespace
 
 SvgExportResult ExportSvg(const CanvasState &state,
                           const SvgExportRequest &request) {
   SvgExportResult result;
+  if (request.scope == SvgExportScope::ExportArea &&
+      request.export_area_target == SvgExportAreaTarget::AllExportAreas &&
+      request.all_export_mode == SvgExportAllMode::FilePerExportArea) {
+    result.message =
+        "Preview supports single-bed export or combined all-beds export.";
+    return result;
+  }
+
   WorldRect world_bounds;
   std::optional<ExportPlan> plan;
   if (request.scope == SvgExportScope::ActiveSelection) {
@@ -830,9 +1000,28 @@ SvgExportResult ExportSvg(const CanvasState &state,
       << FormatNumber(width) << "\" height=\"" << FormatNumber(height)
       << "\" viewBox=\"0 0 " << FormatNumber(width) << ' '
       << FormatNumber(height) << "\" data-im2d-scope=\""
-      << (request.scope == SvgExportScope::ActiveSelection ? "selection"
-                                                           : "export-area")
+      << (request.scope == SvgExportScope::ActiveSelection
+              ? "selection"
+              : (request.export_area_target ==
+                         SvgExportAreaTarget::AllExportAreas
+                     ? "all-export-areas"
+                     : "export-area"))
+      << "\" data-im2d-export-area-count=\""
+      << (request.scope == SvgExportScope::ExportArea ? result.export_area_count
+                                                      : 0)
+      << "\" data-im2d-include-working-area-geometry=\""
+      << (request.include_working_area_geometry ? "true" : "false")
       << "\">\n";
+
+  if (request.scope == SvgExportScope::ExportArea &&
+      request.include_working_area_geometry) {
+    result.working_area_count = static_cast<int>(plan->working_areas.size());
+    for (const WorkingArea *working_area : plan->working_areas) {
+      if (working_area != nullptr) {
+        AppendSerializedWorkingArea(svg, *working_area, world_bounds.min, 1);
+      }
+    }
+  }
 
   for (const ExportArtworkSelection &selection : plan->artwork_selections) {
     AppendSerializedArtwork(svg, selection, world_bounds.min, &result);
@@ -855,6 +1044,15 @@ SvgExportResult ExportSvg(const CanvasState &state,
   result.message = "Exported " + std::to_string(result.path_count) +
                    " paths and " + std::to_string(result.text_count) +
                    " DXF text items to SVG";
+  if (request.scope == SvgExportScope::ExportArea && result.export_area_count > 0) {
+    result.message += " across " + std::to_string(result.export_area_count) +
+                      " bed" + (result.export_area_count == 1 ? "" : "s");
+  }
+  if (result.working_area_count > 0) {
+    result.message += " including " + std::to_string(result.working_area_count) +
+                      " working-area outline" +
+                      (result.working_area_count == 1 ? "" : "s");
+  }
   if (result.warning_count > 0) {
     result.message += " with " + std::to_string(result.warning_count) +
                       " warning" + (result.warning_count == 1 ? "" : "s");
@@ -882,6 +1080,34 @@ SvgExportResult ExportSvgToFile(const CanvasState &state,
   result.output_path = output_path.lexically_normal().string();
   result.message += " Saved to " + result.output_path + ".";
   return result;
+}
+
+std::vector<std::filesystem::path> DefaultSvgExportPaths(
+    const CanvasState &state, const SvgExportRequest &request) {
+  if (request.scope == SvgExportScope::ActiveSelection) {
+    return {DefaultSelectionExportPath(state, request)};
+  }
+
+  if (request.export_area_target == SvgExportAreaTarget::AllExportAreas &&
+      request.all_export_mode == SvgExportAllMode::FilePerExportArea) {
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(state.export_areas.size());
+    for (const ExportArea &area : state.export_areas) {
+      paths.push_back(DefaultSpecificExportAreaPath(state, area.id));
+    }
+    return paths;
+  }
+
+  if (request.export_area_target == SvgExportAreaTarget::AllExportAreas) {
+    return {DefaultAllExportAreasCombinedPath()};
+  }
+
+  const std::optional<int> export_area_id =
+      ResolveSpecificExportAreaId(state, request);
+  if (!export_area_id.has_value()) {
+    return {};
+  }
+  return {DefaultSpecificExportAreaPath(state, *export_area_id)};
 }
 
 } // namespace im2d::exporter

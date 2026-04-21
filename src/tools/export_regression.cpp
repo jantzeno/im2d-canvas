@@ -38,7 +38,12 @@ using im2d::ImportedTextContour;
 using im2d::ImportedTextContourRole;
 using im2d::InitializeDefaultDocument;
 using im2d::PrepareImportedArtworkForCutting;
+using im2d::WorkingAreaCreateInfo;
+using im2d::exporter::DefaultSvgExportPaths;
 using im2d::exporter::ExportSvg;
+using im2d::exporter::ExportSvgToFile;
+using im2d::exporter::SvgExportAllMode;
+using im2d::exporter::SvgExportAreaTarget;
 using im2d::exporter::SvgExportRequest;
 using im2d::exporter::SvgExportResult;
 using im2d::exporter::SvgExportScope;
@@ -102,6 +107,25 @@ bool HasNonScalingStroke(const std::string &svg) {
   static const std::regex stroke_width_pattern(R"(<path[^>]*stroke-width="1")");
   return std::regex_search(svg, vector_effect_pattern) &&
          std::regex_search(svg, stroke_width_pattern);
+}
+
+bool SvgContainsArtwork(const std::string &svg, int artwork_id) {
+  const std::string needle =
+      "data-im2d-source-artwork-id=\"" + std::to_string(artwork_id) + "\"";
+  return svg.find(needle) != std::string::npos;
+}
+
+bool SvgContainsWorkingArea(const std::string &svg, int working_area_id) {
+  const std::string needle = "data-im2d-source-working-area-id=\"" +
+                             std::to_string(working_area_id) + "\"";
+  return svg.find(needle) != std::string::npos;
+}
+
+std::string ReadFileText(const fs::path &path) {
+  std::ifstream input(path, std::ios::binary);
+  std::ostringstream buffer;
+  buffer << input.rdbuf();
+  return buffer.str();
 }
 
 bool RegressionTraceEnabled() {
@@ -480,6 +504,25 @@ im2d::ImportedPath MakePath(int id,
   path.stroke_color = ImVec4(1.0f, 1.0f, 1.0f, 1.0f);
   path.segments.assign(segments.begin(), segments.end());
   return path;
+}
+
+ImportedArtwork MakeRectangleArtwork(const std::string &name, int path_id,
+                                     const ImVec2 &origin,
+                                     const ImVec2 &size) {
+  ImportedArtwork artwork;
+  artwork.name = name;
+  artwork.source_format = "SVG";
+  artwork.origin = origin;
+  artwork.paths.push_back(
+      MakePath(path_id,
+               {
+                   MakeLineSegment(ImVec2(0.0f, 0.0f), ImVec2(size.x, 0.0f)),
+                   MakeLineSegment(ImVec2(size.x, 0.0f), ImVec2(size.x, size.y)),
+                   MakeLineSegment(ImVec2(size.x, size.y), ImVec2(0.0f, size.y)),
+                   MakeLineSegment(ImVec2(0.0f, size.y), ImVec2(0.0f, 0.0f)),
+               },
+               true, name + " Path"));
+  return artwork;
 }
 
 const im2d::ImportedPath *FindPathById(const ImportedArtwork &artwork,
@@ -1087,6 +1130,204 @@ TestRun RunPlaceholderPolicyRegression() {
         allowed_result.svg.find("data-im2d-placeholder=\"true\"") !=
             std::string::npos,
         "Allowed placeholder export should mark placeholder contours in SVG.");
+  return run;
+}
+
+TestRun RunSvgExportTargetRegression(const fs::path &project_root) {
+  TestRun run{"SVG export target selection"};
+  CanvasState state = MakeDocument();
+
+  WorkingAreaCreateInfo second_bed;
+  second_bed.name = "Bed 2";
+  second_bed.size_pixels = ImVec2(40.0f, 40.0f);
+  im2d::AddWorkingArea(state, second_bed);
+
+  if (!Check(&run, state.export_areas.size() == 2,
+             "Expected two export areas after creating a second bed.")) {
+    return run;
+  }
+
+  state.working_areas[0].origin = ImVec2(0.0f, 0.0f);
+  state.working_areas[0].size = ImVec2(40.0f, 40.0f);
+  state.export_areas[0].origin = state.working_areas[0].origin;
+  state.export_areas[0].size = state.working_areas[0].size;
+
+  state.working_areas[1].origin = ImVec2(100.0f, 0.0f);
+  state.working_areas[1].size = ImVec2(40.0f, 40.0f);
+  state.export_areas[1].origin = state.working_areas[1].origin;
+  state.export_areas[1].size = state.working_areas[1].size;
+
+  const int bed_one_artwork_id = AppendImportedArtwork(
+      state, MakeRectangleArtwork("Bed One Artwork", 1, ImVec2(5.0f, 5.0f),
+                                  ImVec2(10.0f, 10.0f)),
+      false);
+  const int bed_two_artwork_id = AppendImportedArtwork(
+      state, MakeRectangleArtwork("Bed Two Artwork", 2, ImVec2(105.0f, 5.0f),
+                                  ImVec2(10.0f, 10.0f)),
+      false);
+
+  const ImportedArtwork *bed_one_artwork =
+      FindImportedArtwork(state, bed_one_artwork_id);
+  const ImportedArtwork *bed_two_artwork =
+      FindImportedArtwork(state, bed_two_artwork_id);
+  if (!Check(&run, bed_one_artwork != nullptr && bed_two_artwork != nullptr,
+             "Synthetic bed artwork was not added to canvas state.")) {
+    return run;
+  }
+
+  SelectAllImportedElements(state, *bed_one_artwork);
+  const SvgExportResult selection = ExportSelection(state, bed_one_artwork_id);
+  Check(&run, selection.success,
+        "Selection export should remain available for the selected artwork.");
+  Check(&run, selection.path_count == 1,
+        "Selection export should include exactly one artwork path.");
+
+  SvgExportRequest single_bed_request;
+  single_bed_request.scope = SvgExportScope::ExportArea;
+  single_bed_request.export_area_id = state.export_areas.front().id;
+  const std::vector<fs::path> single_bed_paths =
+      DefaultSvgExportPaths(state, single_bed_request);
+  Check(&run,
+        single_bed_paths.size() == 1 &&
+            single_bed_paths.front() ==
+                (fs::path("build") / "exports" / "bed-1.svg"),
+        "Single-bed export should plan build/exports/bed-1.svg.");
+
+  const SvgExportResult single_bed = ExportSvg(state, single_bed_request);
+  Check(&run, single_bed.success,
+        "Single-bed export should succeed for the first bed.");
+  Check(&run, single_bed.export_area_count == 1,
+        "Single-bed export should report one bed.");
+  Check(&run, single_bed.path_count == 1,
+        "Single-bed export should only serialize one path.");
+  Check(&run, SvgContainsArtwork(single_bed.svg, bed_one_artwork_id),
+        "Single-bed export should include the first bed artwork.");
+  Check(&run, !SvgContainsArtwork(single_bed.svg, bed_two_artwork_id),
+        "Single-bed export should exclude the second bed artwork.");
+
+  SvgExportRequest single_bed_with_geometry = single_bed_request;
+  single_bed_with_geometry.include_working_area_geometry = true;
+  const SvgExportResult single_bed_geometry =
+      ExportSvg(state, single_bed_with_geometry);
+  Check(&run, single_bed_geometry.success,
+        "Single-bed export with working-area geometry should succeed.");
+  Check(&run, single_bed_geometry.working_area_count == 1,
+        "Single-bed export with geometry should include one working-area outline.");
+  Check(&run, SvgContainsWorkingArea(single_bed_geometry.svg, state.working_areas[0].id),
+        "Single-bed export with geometry should include the first bed outline.");
+  Check(&run,
+        !SvgContainsWorkingArea(single_bed_geometry.svg, state.working_areas[1].id),
+        "Single-bed export with geometry should exclude the second bed outline.");
+
+  SvgExportRequest all_beds_combined_request = single_bed_request;
+  all_beds_combined_request.export_area_target =
+      SvgExportAreaTarget::AllExportAreas;
+  all_beds_combined_request.export_area_id = 0;
+  all_beds_combined_request.all_export_mode = SvgExportAllMode::Combined;
+  const std::vector<fs::path> all_beds_combined_paths =
+      DefaultSvgExportPaths(state, all_beds_combined_request);
+  Check(&run,
+        all_beds_combined_paths.size() == 1 &&
+            all_beds_combined_paths.front() ==
+                (fs::path("build") / "exports" / "all-beds.svg"),
+        "Combined all-beds export should plan build/exports/all-beds.svg.");
+
+  const SvgExportResult all_beds_combined =
+      ExportSvg(state, all_beds_combined_request);
+  Check(&run, all_beds_combined.success,
+        "Combined all-beds export should succeed.");
+  Check(&run, all_beds_combined.export_area_count == 2,
+        "Combined all-beds export should report two beds.");
+  Check(&run, all_beds_combined.path_count == 2,
+        "Combined all-beds export should serialize both paths.");
+  Check(&run, SvgContainsArtwork(all_beds_combined.svg, bed_one_artwork_id),
+        "Combined all-beds export should include the first bed artwork.");
+  Check(&run, SvgContainsArtwork(all_beds_combined.svg, bed_two_artwork_id),
+        "Combined all-beds export should include the second bed artwork.");
+  Check(&run,
+        all_beds_combined.svg.find("data-im2d-scope=\"all-export-areas\"") !=
+            std::string::npos,
+        "Combined all-beds export should tag the SVG scope as all-export-areas.");
+
+  SvgExportRequest all_beds_combined_with_geometry = all_beds_combined_request;
+  all_beds_combined_with_geometry.include_working_area_geometry = true;
+  const SvgExportResult all_beds_geometry =
+      ExportSvg(state, all_beds_combined_with_geometry);
+  Check(&run, all_beds_geometry.success,
+        "Combined all-beds export with geometry should succeed.");
+  Check(&run, all_beds_geometry.working_area_count == 2,
+        "Combined all-beds export with geometry should include both bed outlines.");
+  Check(&run, SvgContainsWorkingArea(all_beds_geometry.svg, state.working_areas[0].id),
+        "Combined all-beds export with geometry should include the first bed outline.");
+  Check(&run, SvgContainsWorkingArea(all_beds_geometry.svg, state.working_areas[1].id),
+        "Combined all-beds export with geometry should include the second bed outline.");
+
+  SvgExportRequest all_beds_per_file_request = all_beds_combined_request;
+  all_beds_per_file_request.all_export_mode = SvgExportAllMode::FilePerExportArea;
+  const std::vector<fs::path> all_beds_per_file_paths =
+      DefaultSvgExportPaths(state, all_beds_per_file_request);
+  Check(&run,
+        all_beds_per_file_paths.size() == 2 &&
+            all_beds_per_file_paths[0] ==
+                (fs::path("build") / "exports" / "bed-1.svg") &&
+            all_beds_per_file_paths[1] ==
+                (fs::path("build") / "exports" / "bed-2.svg"),
+        "Per-bed export should plan one build/exports/bed-#.svg path per bed.");
+
+  const fs::path output_root =
+      project_root / "build" / "test-output" / "svg-export-target-selection";
+  std::error_code remove_error;
+  fs::remove_all(output_root, remove_error);
+
+  std::vector<fs::path> written_paths;
+  for (size_t index = 0; index < state.export_areas.size(); ++index) {
+    SvgExportRequest per_bed_request = all_beds_per_file_request;
+    per_bed_request.export_area_target = SvgExportAreaTarget::SpecificExportArea;
+    per_bed_request.all_export_mode = SvgExportAllMode::Combined;
+    per_bed_request.export_area_id = state.export_areas[index].id;
+    per_bed_request.include_working_area_geometry = true;
+
+    const fs::path output_path =
+        output_root / all_beds_per_file_paths[index].filename();
+    const SvgExportResult file_result =
+        ExportSvgToFile(state, per_bed_request, output_path);
+    if (!Check(&run, file_result.success,
+               "Per-bed export file write failed for bed index " +
+                   std::to_string(index + 1) + ": " + file_result.message)) {
+      fs::remove_all(output_root, remove_error);
+      return run;
+    }
+    written_paths.push_back(output_path);
+  }
+
+  if (!Check(&run, written_paths.size() == 2,
+             "Expected two written output files for per-bed export.")) {
+    fs::remove_all(output_root, remove_error);
+    return run;
+  }
+
+  Check(&run, fs::exists(written_paths[0]) && fs::exists(written_paths[1]),
+        "Per-bed export should write one SVG file for each bed.");
+  const std::string bed_one_svg = ReadFileText(written_paths[0]);
+  const std::string bed_two_svg = ReadFileText(written_paths[1]);
+  Check(&run, SvgContainsArtwork(bed_one_svg, bed_one_artwork_id),
+        "First per-bed SVG should include the first bed artwork.");
+  Check(&run, !SvgContainsArtwork(bed_one_svg, bed_two_artwork_id),
+        "First per-bed SVG should exclude the second bed artwork.");
+  Check(&run, SvgContainsWorkingArea(bed_one_svg, state.working_areas[0].id),
+        "First per-bed SVG should include the first bed outline.");
+  Check(&run, !SvgContainsWorkingArea(bed_one_svg, state.working_areas[1].id),
+        "First per-bed SVG should exclude the second bed outline.");
+  Check(&run, SvgContainsArtwork(bed_two_svg, bed_two_artwork_id),
+        "Second per-bed SVG should include the second bed artwork.");
+  Check(&run, !SvgContainsArtwork(bed_two_svg, bed_one_artwork_id),
+        "Second per-bed SVG should exclude the first bed artwork.");
+  Check(&run, SvgContainsWorkingArea(bed_two_svg, state.working_areas[1].id),
+        "Second per-bed SVG should include the second bed outline.");
+  Check(&run, !SvgContainsWorkingArea(bed_two_svg, state.working_areas[0].id),
+        "Second per-bed SVG should exclude the first bed outline.");
+
+  fs::remove_all(output_root, remove_error);
   return run;
 }
 
@@ -1770,6 +2011,7 @@ int main() {
   results.push_back(RunFidelityFirstPreservesUntouchedContoursRegression());
   results.push_back(RunDxfInchUnitScaleRegression(project_root));
   results.push_back(RunShapefontRegression(project_root));
+  results.push_back(RunSvgExportTargetRegression(project_root));
   results.push_back(RunAutobotAutoCloseWorkflowRegression(project_root));
   results.push_back(RunAutobotPrepareRegression(project_root));
   results.push_back(RunSvgCubicRegression(project_root));
